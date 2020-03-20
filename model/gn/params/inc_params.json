@@ -1,0 +1,6 @@
+{
+    "cash_on_hand": 0.85, 
+    "inc_shk_rescale": 1.4, 
+    "inc_unemp": 0.5, 
+    "prb_unemp": 0.1
+}

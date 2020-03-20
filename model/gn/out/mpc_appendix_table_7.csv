@@ -1,0 +1,13 @@
+rows,c_pre,c_post,mpc
+High Cash-on-Hand,0.922,0.972,0.034
+Baseline,0.566,0.57,0.003
+Low Cash-on-Hand,0.332,0.332,0.0
+Has HELOC,0.674,0.687,0.009
+Write down to 90% LTV,0.586,0.6,0.01
+Collateral Constraint = 0,0.566,0.636,0.048
+90% LTV & Constraint = 0,0.587,0.792,0.141
+Age At Mod = 35,0.586,0.6,0.009
+Fast House Price Growth (5%),0.585,0.676,0.062
+Fast House Price Growth (5%) & Collateral = 0,0.595,0.945,0.242
+CRRA = 2,0.633,0.647,0.009
+Beta = 0.90,0.599,0.61,0.008

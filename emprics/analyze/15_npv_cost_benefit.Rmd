@@ -1,0 +1,1098 @@
+---
+title: "NPV Cost-Benfit Analysis for Different Modifications"
+author: "Xian Ng"
+date: "Jan 24, 2018"
+output: pdf_document
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir = '../') 
+
+```
+
+
+```{r functions, include=FALSE}
+getwd()
+options(scipen=999)
+source('./func/prelim_local.R')
+
+#Functions
+source('./func/default_rate_assess.R')
+source('./func/npv_calc_funcs.R')
+source('./func/yield_curve.R')
+
+```
+### Setup Initial Conditions & Parameters
+```{r cars}
+df <-
+  read_xls('./data/mtg_rd_ac2019-03-22.xls', sheet='tbl_sum_stats') %>%
+  select(Variable, Mean) %>%
+  as.data.frame()
+
+rownames(df) <- df$Variable
+df <- df %>% select('Mean') %>% t() %>% as.data.frame()
+ltv <- df$`Loan to Value Ratio`
+mtmval_jpmc <- df$`Home Value`
+upb_0_jpmc <- (1/100) * df$`Loan to Value Ratio` * df$`Home Value`
+r_jpmc <- df$`Mortgage Interest Rate`
+term_jpmc <- round(df$`Mortgage Term Remaining (Years)`)
+
+#Terms for representative mortgage
+base_terms_rhs <- list(r_temp = r_jpmc, r_perm = r_jpmc, term = term_jpmc, upb_0 = upb_0_jpmc, forbear = 0.0)
+pmt_stream_rhs <- pmt_stream(base_terms_rhs)
+base_terms_5_pct <- list(r_temp = 0.05, r_perm = 0.05, term = term_jpmc, upb_0 = upb_0_jpmc, forbear = 0.0)
+pmt_stream_5_pct <- pmt_stream(base_terms_5_pct)
+
+#Different Discount Rates -
+yield_curves <- read_csv('./data/calc_npv_data/yield_curves.csv')
+disc_rate_30 <-  yield_curves %>% filter(id == 'implied_gse') %>% select(rate_30) %>% pull() %>% round(4)
+disc_rate_40 <- yield_curves %>% filter(id == 'implied_gse') %>% select(rate_40) %>% pull() %>% round(4)
+disc_vec_30 <- rep(1/(1+disc_rate_30), 40)
+disc_vec_40 <- rep(1/(1+disc_rate_40), 40)
+disc_rates <- round(sapply(seq(30, 40, 1),
+                           function(x) -0.03297+1.13788*log(x))/100, 4) #interpolates from 30 to 40 year
+
+#Prepayment and Default
+prepay_vec_dynamic <- calc_prepayment(pmt_stream_rhs$upb, mtmval_jpmc)
+prepay_vec_5_pct <- calc_prepayment(pmt_stream_5_pct$upb, mtmval_jpmc)
+
+dflt_factor_5year <-45.6/ 28.1 #Conversion factor from 2 year to 5 year default rates
+dflt_5_year_nomod <- calc_mod_dflt(0)
+dflt_2_year_nomod <- dflt_5_year_nomod / dflt_factor_5year
+
+#Different assumptions
+assumps_dynamic_30 <- list(mtmval=mtmval_jpmc, prepay_vec=prepay_vec_dynamic, disc_vec=disc_vec_30,
+                           p_dflt=dflt_5_year_nomod, recovery='baseline')
+assumps_dynamic_30_pessimistic <- list(mtmval=mtmval_jpmc, prepay_vec=prepay_vec_dynamic, disc_vec=disc_vec_30,
+                                       p_dflt=dflt_5_year_nomod, recovery='pessimistic')
+assumps_dynamic_30_optimistic <- list(mtmval=mtmval_jpmc, prepay_vec=prepay_vec_dynamic, disc_vec=disc_vec_30,
+                                      p_dflt=dflt_5_year_nomod, recovery='optimistic')
+assumps_pay_on_schd_30 <- list(mtmval=mtmval_jpmc, prepay_vec=rep(0.0, 40), disc_vec=disc_vec_30, p_dflt=0, recovery='baseline')
+assumps_5_pct <- list(mtmval=mtmval_jpmc, prepay_vec=prepay_vec_5_pct, disc_vec=disc_vec_30,
+                      p_dflt=dflt_5_year_nomod, recovery='baseline')
+
+#For saving output stats
+df_stats <- data_frame('stat' = character(),
+                       'value' = double(),
+                       'unit' = character())
+
+```
+
+
+```{r bar_graph_funcs, include=FALSE}
+cost_target_pay_red <- function(target, mod_type, base_terms, assumps, limit, verbose=FALSE, dynamic=FALSE){
+  # Gets the cost to investor of reaching a target payment reduction using a particular modification
+  # Args:
+  #   target: payment reduction, fraction of initial payment
+  #   mod_type: one of 'mat_extend', 'rate_temp', 'rate_perm', 'forgive', 'forbear'
+  #   base_terms: list of base mortgage terms r_temp, r_perm, upb_0, term, forbear
+  #   assumps: list of assumptions; mtmval, prepay_vec, disc_vec, p_dflt
+  #   limit: maximum amount of modification in year, fraction, or dollar terms
+  # 
+  # 
+  pmt_stream_base <- pmt_stream(base_terms)
+  target_dollars <- target * pmt_stream_base$pay[[1]]
+  
+  #Find the zero of this function
+  target_zero <- function(amt_mod, mod_type, limit){
+    dpmt(amt_mod, base_terms, mod_type, limit) - target_dollars
+  }
+  
+  
+  #Find required modification to reach targeted reduction using func above
+  if(mod_type=='mat_extend'){
+    amt_mod <- uniroot.integer(target_zero, c(0,40 -base_terms$term),mod_type=mod_type, limit=limit)$root  
+  }
+  if(mod_type=='r_temp' | mod_type=='r_perm'){
+    amt_mod <- uniroot(target_zero, c(0,1),mod_type=mod_type, limit=limit)$root  
+  }
+  if(mod_type=='forgive' | mod_type=='forbear'){
+    amt_mod <- uniroot(target_zero, c(0,limit),mod_type=mod_type, limit=limit)$root  
+  }
+  
+  #Modify mod_terms
+  mod_terms <- base_terms
+  if(mod_type=='mat_extend'){
+    mod_terms$term <- mod_terms$term + amt_mod
+  }
+  if(mod_type=='r_temp'){
+    mod_terms$r_temp <- mod_terms$r_temp - amt_mod
+  }
+  if(mod_type=='r_perm'){
+    mod_terms$r_temp <- mod_terms$r_temp - amt_mod
+    mod_terms$r_perm <- mod_terms$r_perm - amt_mod
+  }
+  if(mod_type=='forgive'){
+    mod_terms$upb_0 <- mod_terms$upb_0 - amt_mod
+  }
+  if(mod_type=='forbear'){
+    mod_terms$forbear <- mod_terms$forbear + amt_mod
+  }
+  
+  #New mortgage terms
+  pmt_stream_mod <- pmt_stream(mod_terms)
+  d_pay_dollars <- pmt_stream_base$pay[1] - pmt_stream_mod$pay[1]
+  d_pay_percent <- 100 * d_pay_dollars /  pmt_stream_base$pay[1]
+  
+  #Allow for payment reducion to affect prepayment and default
+  assumps_init <- assumps
+  assumps_mod <- assumps
+  if(dynamic==TRUE){
+    #What is the default rate after modification?
+    assumps_mod$p_dflt <- calc_mod_dflt(d_pay_percent)
+    
+    #What is prepayment after modification
+    assumps_mod$prepay_vec <- calc_prepayment(pmt_stream_mod$upb, assumps_mod$mtmval)
+  }
+  
+  #If maturity extension, what is the new discount rate
+  assumps_mod$disc_vec <- rep(1/(1+disc_rates[max(30, min(mod_terms$term, 40))-29]), 40)
+  
+  #Calculate change in npv
+  npv_init <- calc_npv_frm_terms(base_terms, assumps_init)
+  npv_mod <- calc_npv_frm_terms(mod_terms, assumps_mod)
+  cost_npv <- -(npv_mod - npv_init)
+  
+  #Format results
+  if(verbose==TRUE){
+    return(list('amt_mod' = amt_mod, 'cost_npv'= cost_npv,
+                'd_pay_dollars' = d_pay_dollars, 'd_pay_percent' = d_pay_percent,
+                'mod_type' = mod_type, 'constract ' =mod_terms))
+  }
+  return(list('amt_mod' = amt_mod, 'cost_npv'= cost_npv,
+              'd_pay_dollars' = d_pay_dollars, 'd_pay_percent' = d_pay_percent,
+              'mod_type' = mod_type))
+  
+}
+
+cost_target_pay_red_df <- function(pay_red_goal, base_terms,assumps, dynamic){
+  #Calculates cost of acheiving pay_red_goal using the 5 different mods under specific assumptions
+  #Args:
+  #   pay_red_goal: fractional amount of payment reduction to be achieved
+  #   base_terms: base mortgage terms
+  #   assumps: assumptions
+  #   dynamic: Does Modification affect default and prepayment?
+  
+  df <- data_frame(mod_type=character(),
+                   amt_mod=double(),
+                   d_pay_dollars=double(),
+                   d_pay_percent=double(),
+                   cost_npv=double())
+  
+  df <- bind_rows(df, cost_target_pay_red(pay_red_goal, 'mat_extend',base_terms, assumps, dynamic = dynamic, limit = 40))
+  df <- bind_rows(df, cost_target_pay_red(pay_red_goal, 'r_temp', base_terms, assumps, dynamic = dynamic, limit = 0.02))
+  df <- bind_rows(df, cost_target_pay_red(pay_red_goal, 'r_perm', base_terms, assumps, dynamic = dynamic, limit = 0.02))
+  df <- bind_rows(df, cost_target_pay_red(pay_red_goal, 'forgive', base_terms, assumps, dynamic = dynamic, limit = 60000))
+  df <- bind_rows(df, cost_target_pay_red(pay_red_goal, 'forbear', base_terms, assumps, dynamic = dynamic, limit = 60000))
+
+  return(df)
+}
+```
+
+### What is the cost of achieving 10% payment reduction with the different methods?
+Rate reductions are in fractions (multiply by 100 to get percentage points). Maturity extenion is in years. Forgiveness and forbearance are in dollars. Note that the discount rate used when calculating maturity extension is `r round(100*disc_rate_40,2)`\% compared to`r round(100*disc_rate_30,2)`\% for the other modifications.
+```{r bar_graphs_data, warning=FALSE}
+#Setup for bar graphs
+pay_red_goal <- 0.1
+
+df_pay_owed <- cost_target_pay_red_df(pay_red_goal, base_terms_rhs, assumps_pay_on_schd_30, dynamic=FALSE)
+df_pay_expect <- cost_target_pay_red_df(pay_red_goal, base_terms_rhs, assumps_dynamic_30, dynamic=TRUE)
+df_recover_optimistic <- cost_target_pay_red_df(pay_red_goal, base_terms_rhs, assumps_dynamic_30_optimistic, dynamic=TRUE)
+df_recover_pessimistic <- cost_target_pay_red_df(pay_red_goal, base_terms_rhs, assumps_dynamic_30_pessimistic, dynamic=TRUE)
+df_5_pct <- cost_target_pay_red_df(pay_red_goal, base_terms_5_pct, assumps_5_pct, dynamic=TRUE)
+```
+
+```{r bar_graphs, echo=FALSE}
+#Tables
+kable(df_pay_owed, caption="Cost of 10% payment reduction, no prepayment or default")
+kable(df_pay_expect, caption="Cost of 10% payment reduction, expected prepayment and default")
+write.csv(df_pay_owed, './out/diagnosis/compare_mods_PO.csv')
+write.csv(df_pay_expect, './out/diagnosis/compare_mods_EP.csv')
+#Bar plot
+df_owed_part <-  select(df_pay_owed, mod_type,  cost_npv)
+df_owed_part$assumps <- rep('Payments Owed NPV', nrow(df_owed_part))
+df_expect_part <-  select(df_pay_expect, mod_type, cost_npv)
+df_expect_part$assumps <- rep('Expected Payments NPV', nrow(df_expect_part))
+
+df <- rbind(df_owed_part, df_expect_part)
+df <- df %>% 
+  mutate(mod_type = ifelse(mod_type == 'mat_extend', 'Maturity\nExtension', mod_type),
+         mod_type = ifelse(mod_type == 'r_temp', 'Temporary\nInterest Rate\nReduction', mod_type),
+         mod_type = ifelse(mod_type == 'forbear', 'Principal\nForbearance', mod_type),
+         mod_type = ifelse(mod_type == 'r_perm', 'Permanent\nInterest Rate\nReduction', mod_type),
+         mod_type = ifelse(mod_type == 'forgive', 'Principal\nForgiveness', mod_type),
+         assumps = factor(assumps, levels = c('Payments Owed NPV', 'Expected Payments NPV' )),  
+         type = factor(mod_type,
+                       levels = c('Maturity\nExtension',
+                                  'Temporary\nInterest Rate\nReduction',
+                                  'Principal\nForbearance',
+                                  'Permanent\nInterest Rate\nReduction',
+                                  'Principal\nForgiveness')))
+
+plt <- ggplot(df, aes(x=type, y=cost_npv, fill=assumps)) +
+  geom_bar(stat='identity', position='dodge') +
+  labs(x = '',
+       y = 'Cost to Lender') +
+  scale_y_continuous(labels = scales::dollar) +
+  fte_theme() +
+  theme(legend.title=element_blank(), legend.justification=c(0,1), legend.position=c(0,1),
+        legend.text = element_text(size=10)) +
+  scale_fill_manual(values=cbPalette_blue)
+plt
+ggsave('./out/compare_mods.png', width = 6, height = 4)
+
+#Robustness with 5 bars
+df_recover_optimistic_part <-  select(df_recover_optimistic, mod_type,  cost_npv)
+df_recover_optimistic_part$assumps <- rep('Expected Payments, High Recovery', nrow(df_recover_optimistic_part))
+df_recover_pessimistic_part <-  select(df_recover_pessimistic, mod_type, cost_npv)
+df_recover_pessimistic_part$assumps <- rep('Expected Payments, Low Recovery', nrow(df_recover_pessimistic_part))
+df_5_pct_part <- select(df_5_pct, mod_type, cost_npv)
+df_5_pct_part$assumps <- rep('Expected Payments, 5% Interest Rate', nrow(df_5_pct_part))
+
+df <- rbind(df_owed_part, df_expect_part,df_recover_pessimistic_part, df_recover_optimistic_part, df_5_pct_part)
+df <- df %>% 
+  mutate(mod_type = ifelse(mod_type == 'mat_extend', 'Maturity\nExtension', mod_type),
+         mod_type = ifelse(mod_type == 'r_temp', 'Temporary\nInterest Rate\nReduction', mod_type),
+         mod_type = ifelse(mod_type == 'forbear', 'Principal\nForbearance', mod_type),
+         mod_type = ifelse(mod_type == 'r_perm', 'Permanent\nInterest Rate\nReduction', mod_type),
+         mod_type = ifelse(mod_type == 'forgive', 'Principal\nForgiveness', mod_type),
+         assumps = factor(assumps, levels = c('Payments Owed NPV',
+                                              'Expected Payments NPV',
+                                              'Expected Payments, Low Recovery',
+                                              'Expected Payments, High Recovery',
+                                              'Expected Payments, 5% Interest Rate')),  
+         type = factor(mod_type,
+                       levels = c('Maturity\nExtension',
+                                  'Temporary\nInterest Rate\nReduction',
+                                  'Principal\nForbearance',
+                                  'Permanent\nInterest Rate\nReduction',
+                                  'Principal\nForgiveness')))
+plt <- ggplot(df, aes(x=type, y=cost_npv, fill=assumps)) +
+  geom_bar(stat='identity', position='dodge', width = 0.7) +
+  labs(x = 'Modification Step',
+       y = 'Cost to Investor') +
+  scale_y_continuous(labels = scales::dollar) +
+  fte_theme() +
+  theme(legend.title=element_blank(), legend.justification=c(0,1), legend.position=c(0,1.0),
+        legend.text = element_text(size=10),
+        legend.background = element_blank())+
+  guides(fill = guide_legend(ncol=2))  +
+  ylim(c(-30000, 50000))
+# scale_fill_manual(values=cbPalette_blue)
+
+plt
+ggsave('./out/compare_mods_robust.png', width = 6, height = 4)
+```
+## Waterfall Comparisons
+In this section we describe the cumulative effects of introducting the following modifications in sequence (efficient waterfall):
+
+1. Extension of mortgage term to 40 years
+2. Reduction of interest rate to 2\% for the first 5 years
+3. Principal forbearance until 50\% payment reduction is reached
+
+
+We compare the costs of achieving between 1-60\% payment reductions using the efficient waterfall and the other waterfalls/modifications offered.
+```{r compare_waterfalls_funcs, include=FALSE}
+find_inflec_pts <- function(waterfall, base_terms, assumps, dynamic=TRUE){
+  
+  ### Set up initial conditions and record changes
+  df <- data_frame('waterfall' = character(), 'terms_0' = character(),
+                   'terms_exist' = character(),'terms_mod' = character(),
+                   'd_pay_step' = double(), 'cost_npv' = double())
+  
+  #Before any modification:
+  df <- df %>% add_row('waterfall' = waterfall, 'terms_0' = list(base_terms),
+                       'terms_exist' = list(base_terms), 'terms_mod' = list(base_terms),
+                       'd_pay_step' = 0.0, 'cost_npv' = 0.0)
+  
+  ### Helper Function
+  find_inflec_helper <- function(terms_0, terms_exist, mod_type, dynamic=TRUE){
+    # Finds the change in payment and cost to investor of maxing out a particular modification and writes to a dataframe``
+    # 
+    # Args:
+    #   terms_0: Baseline, no-mod terms
+    #   terms_exist: Terms to be modified, not necessarily same as terms_0
+    #   mod_type: Type of modification to max out
+    #   
+    # Returns:
+    #   df of:
+    #     waterfall: Current waterfall being evaluated
+    #     terms_0: Baseline, no-mod terms
+    #     terms_exist: Terms to be modified
+    #     terms_mod: Modified terms, with mod_type maxed out
+    #     d_pay_step: Change in payment between terms_mod and terms_exist, in dollars (change in x coord)
+    #     cost_npv: npv cost to investor between terms_mod and terms_0 under assumptions (y coord)
+    terms_mod <- terms_exist
+    
+    if(mod_type=='mat_extend'){
+      limit = 40
+      terms_mod$term <- limit
+      amt_mod <- limit - terms_exist$term
+    }
+    if(mod_type=='r_temp'){
+      limit = 0.02
+      terms_mod$r_temp <- limit
+      amt_mod <- terms_exist$r_temp - limit
+    }
+    if(mod_type=='r_perm'){
+      limit <- disc_rate_30 #Minimum permanent interest rate
+      terms_mod$r_temp <- disc_rate_30
+      terms_mod$r_perm <- disc_rate_30
+      amt_mod <- terms_exist$r_perm - disc_rate_30
+    }
+    if(mod_type=='forgive'){
+      limit <- terms_exist$upb_0 - assumps$mtmval *1.15 #Forgive until ltv = 1.15*mtmval
+      if(waterfall =='Principal Forgiveness'){
+        limit <- 180000
+      }
+      terms_mod$upb_0 <- terms_exist$upb_0 - limit
+      amt_mod <- limit
+    }
+    if(mod_type=='forbear'){
+      limit <- 50000
+      terms_mod$forbear <- terms_exist$forbear + limit
+      amt_mod <- limit
+    }
+    
+    #Change in payment: increase in x-coordinate
+    d_pay_step <- dpmt(amt_mod, terms_exist, mod_type = mod_type, limit = limit)
+    #Cost to investor from status quo of no mod: y-coordinate
+    cost_npv <- calc_cost_mod(terms_mod, terms_0, assumps, dynamic=dynamic)
+    
+    #Add results to df
+    results = data_frame('waterfall'=waterfall, 'terms_0'=list(terms_0),
+                         'terms_exist'=list(terms_exist), 'terms_mod'=list(terms_mod),
+                         'd_pay_step'=d_pay_step, 'cost_npv'=cost_npv)
+  }
+  
+  ############ Can we streamline this???#############
+  if (waterfall == "HAMP Principal Reduction Alternative") {
+    seq_waterfall <- c("forgive", "r_perm", "r_temp", "mat_extend", "forbear")
+  }
+  if (waterfall == "HAMP") {
+    seq_waterfall <- c("r_perm", "r_temp", "mat_extend", "forbear")
+  }
+  if (waterfall == "Private Chase") {
+    seq_waterfall <- c("mat_extend", "r_perm", "r_temp", "forbear")
+  }
+  if (waterfall == "Private GSE") {
+    seq_waterfall <- c("mat_extend", "r_perm", "r_temp", "forbear") #Same as CHAMP for now
+  }
+  if (waterfall == "Efficient Default-minimizing") {
+    seq_waterfall <- c("mat_extend", "r_temp", "forbear")
+  }
+  if (waterfall == "Principal Forgiveness") {
+    seq_waterfall <- c("forgive")
+  }
+  
+  #Evaluate inflection points
+  for(mod in seq_waterfall){
+    terms_mod_prev <-  df[[nrow(df), 'terms_mod']]
+    df <- df %>% rbind(find_inflec_helper(terms_0 = base_terms, terms_exist =terms_mod_prev, mod_type = mod, dynamic=dynamic))
+  }
+  
+  #Add additional columns to dataframe
+  pay_0 <- pmt_stream(base_terms)$pay[[1]]
+  df$d_pay_cum <- cumsum(df$d_pay_step)
+  df$pay_red_cum <- df$d_pay_cum / pay_0
+  
+  return(df)
+}
+
+
+
+```
+
+###Find Inflection Points
+For each of the waterfalls, we find the amount of payment reduction reached and thee npv cost at each inflection point where the waterfall switches to a different method of payment reduction. 
+```{r compare_waterfalls_compute, warning=FALSE}
+df_compare <- data_frame('waterfall' = character(), 'terms_0' = character(),
+                         'terms_exist' = character(), 'terms_mod' = character(),
+                         'd_pay_step' = double(), 'cost_npv' = double(),
+                         'd_pay_cum' = double(), 'pay_red_cum'=double())
+df_compare_PO <- df_compare
+
+for(waterfall in c("HAMP Principal Reduction Alternative",
+                   "HAMP",
+                   "Efficient Default-minimizing",
+                   "Principal Forgiveness")){
+  df_compare <- df_compare %>% rbind(find_inflec_pts(waterfall, base_terms_rhs, assumps_dynamic_30))
+  df_compare_PO <- df_compare_PO %>% rbind(find_inflec_pts(waterfall, base_terms_rhs, assumps_pay_on_schd_30, dynamic=FALSE))
+}  
+df_compare_sparse <- df_compare %>% select(waterfall, pay_red_cum, cost_npv)
+df_compare_PO_sparse <- df_compare_PO %>% select(waterfall, pay_red_cum, cost_npv)
+```
+
+
+```{r compare_waterfalls_robust, include=FALSE}
+df_compare_pessimistic <- data_frame('waterfall' = character(), 'terms_0' = character(),
+                                     'terms_exist' = character(), 'terms_mod' = character(),
+                                     'd_pay_step' = double(), 'cost_npv' = double(),
+                                     'd_pay_cum' = double(), 'pay_red_cum'=double())
+df_compare_pessimistic <- df_compare_pessimistic %>% rbind(find_inflec_pts("Efficient Default-minimizing", base_terms_rhs, assumps_dynamic_30_pessimistic))
+df_compare_pessimistic_sparse <- df_compare_pessimistic %>% select(waterfall, pay_red_cum, cost_npv)
+```
+
+```{r stats_for_text, include=FALSE}
+### Stats for Text ###
+pay_no_mod <- pmt_stream(base_terms_rhs)$pay[[1]]
+
+df_stats <-df_stats %>% add_row('stat' = 'HAMP PRA follows the upper envelope of the least efficient policy until a payment reduction of () is reached',
+                                'value' = filter(df_compare, waterfall == "HAMP Principal Reduction Alternative")$pay_red_cum[[2]]*100,
+                                'unit' = 'percentage of initial payment')
+
+df_stats <-df_stats %>% add_row('stat' = 'Maturity extension to 40 years can reduce payments by up to ()',
+                                'value' = filter(df_compare, waterfall == "Efficient Default-minimizing")$pay_red_cum[[2]]*100,
+                                'unit' = 'percentage of initial payment')
+
+df_stats <-df_stats %>% add_row('stat' = 'Payments can be reduced by an additional () by reducing r_temp to 2%',
+                                'value' = 100 * filter(df_compare, waterfall == "Efficient Default-minimizing")$d_pay_step[[3]]/pay_no_mod,
+                                'unit' = 'percentage of initial payment')
+
+#Breakeven point for ED-M
+#Get payment reduction target when NPV is 0
+pmt_target_zero_npv <- uniroot(function(pmt_target)
+  calc_cost_mod(wfall_mod_terms(pmt_target, "Efficient Default-minimizing", base_terms_rhs,
+                                mtmval=assumps_dynamic_30$mtmval, min_r_perm = disc_rate_30),
+                base_terms_rhs,
+                assumps_dynamic_30),
+  c(0.01, 0.85),
+  extendInt="no",
+  maxiter=8)$root
+
+cost_neutral_edm_mod <- wfall_mod_terms(pmt_target_zero_npv, "Efficient Default-minimizing", base_terms_rhs,
+                  mtmval=assumps_dynamic_30$mtmval, min_r_perm = disc_rate_30)
+
+df_stats <-df_stats %>% add_row('stat' = 'Break-even point has () payment reduction',
+                                'value' = 100 * pmt_target_zero_npv,
+                                'unit' = 'percentage of payment reduction')
+df_stats <-df_stats %>% add_row('stat' = 'With () r_temp reduction',
+                                'value' = 100 * (base_terms_rhs$r_temp -cost_neutral_edm_mod$r_temp),
+                                'unit' = 'percentage point of rate reduction')
+df_stats <-df_stats %>% add_row('stat' = 'and with () forbearance',
+                                'value' = cost_neutral_edm_mod$forbear,
+                                'unit' = 'dollars')
+
+```
+
+
+### Waterfalls Grid
+For each of the waterfalls, we compute the npv cost at a grid over a grid of payment reduction.
+```{r waterfall_grid, warning=FALSE}
+df_waterfall <- data_frame('pay_red_cum' = c(seq(0.05, 0.7, 0.05),
+                                             seq(0.05, 0.7, 0.05),
+                                             seq(0.05, 0.7, 0.05),
+                                             seq(0.05, 0.7, 0.05)),
+                           'waterfall' = c(rep('Principal Forgiveness', 14),
+                                           rep('HAMP', 14),
+                                           rep('HAMP Principal Reduction Alternative', 14),
+                                           rep('Efficient Default-minimizing', 14)))
+df_waterfall_PO <- df_waterfall
+
+
+#Compute cost for each of these
+df_waterfall <- df_waterfall %>%
+  rowwise() %>%
+  mutate(cost_npv = npv_cost(pmt_target=pay_red_cum,
+                             waterfall=waterfall,
+                             base_terms=base_terms_rhs,
+                             assumps=assumps_dynamic_30))
+
+
+df_waterfall <- rbind(df_compare_sparse, df_waterfall)
+df_waterfall <- df_waterfall %>% mutate( type=factor(waterfall, levels=c("Efficient Default-minimizing",
+                                                                         "Principal Forgiveness",
+                                                                         "HAMP",
+                                                                         "HAMP Principal Reduction Alternative")))
+
+#Payments Owed version
+df_waterfall_PO <- df_waterfall_PO %>%
+  rowwise() %>%
+  mutate(cost_npv = npv_cost(pmt_target=pay_red_cum,
+                             waterfall=waterfall,
+                             base_terms=base_terms_rhs,
+                             assumps=assumps_pay_on_schd_30,
+                             dynamic=FALSE))
+
+df_waterfall_PO <- rbind(df_compare_PO_sparse, df_waterfall_PO)
+df_waterfall_PO <- df_waterfall_PO %>% mutate( type=factor(waterfall, levels=c("Efficient Default-minimizing",
+                                                                               "Principal Forgiveness",
+                                                                               "HAMP",
+                                                                               "HAMP Principal Reduction Alternative")))
+
+
+```
+
+```{r waterfall_grid_robust, include=FALSE}
+df_waterfall_pessimistic <- data_frame('pay_red_cum' = seq(0.02, 0.62, 0.1),
+                                       'waterfall' =  rep('Efficient Default-minimizing', 7))
+df_waterfall_pessimistic <- df_waterfall_pessimistic %>%
+  rowwise() %>%
+  mutate(cost_npv = npv_cost(pmt_target=pay_red_cum,
+                             waterfall=waterfall,
+                             base_terms=base_terms_rhs,
+                             assumps=assumps_dynamic_30_pessimistic))
+
+df_waterfall_pessimistic <- rbind(df_compare_pessimistic_sparse, df_waterfall_pessimistic)
+```
+
+###NPV Cost Point Estimates
+We compute the average NPV cost for the payment reduction obtained by Chase mods and GSE mods. 
+```{r waterfall_points, warning=FALSE}
+### Point estimates - average cost of GSE and Chase Mods
+#JPMC Borrower Data
+df <- read_xls('./data/mtg_rd_ac2019-03-22.xls', sheet='tbl_local_linear')
+df <- df %>% select('Type' = pos, 'inc' = cplt_loan_brw_incm_am, 
+                    'mtmval' = curr_prop_aprs_val_am, 'pay_mo_pre' = pri_loan_prin_int_am,
+                    'pay_reduc' = pi_due_chg_ratio, 'dflt_post' = delin_ever90)
+                          
+df <- mutate(df, 'Type' =df$Type  %>%lapply((function(pos){
+                                        if(pos=='FALSE'){return('lhs')}
+                                        if(pos=='TRUE'){return('rhs')}}))
+                                            %>% unlist() )
+df$dti_pre <- df$pay_mo_pre / df$inc
+df$pay_mo_post <- df$pay_mo_pre * (1 + df$pay_reduc)
+df$dti_post <- df$pay_mo_post/df$inc
+
+jpmc_bdata <- df %>% as.data.frame()
+rownames(jpmc_bdata) = jpmc_bdata$Type
+jpmc_bdata$dflt_pre <- c(dflt_5_year_nomod, dflt_5_year_nomod) #Assumption about pre-treatment default rates
+jpmc_bdata$dflt_post <- dflt_factor_5year *jpmc_bdata$dflt_post 
+
+
+#GSE Borrower Data # XXX Needs to be updated hardcode
+gse_bdata <- read.csv('./data/calc_npv_data/gse_bdata.csv')
+rownames(gse_bdata) = gse_bdata$Type
+gse_bdata$dflt_pre <- c(dflt_5_year_nomod, dflt_5_year_nomod) #Assumption about pre-treatment default rates
+gse_bdata$dflt_post <- dflt_factor_5year * c(0.216, 0.273) #Eyeballing LHS/RHS from RD in chartbook
+
+
+#Average cost to investors of the CHAMP and GSE mods
+dnpv_gse <- npv_cost((-1)*gse_bdata['lhs', 'pay_reduc'],
+                     "Private GSE",
+                     base_terms_rhs,
+                     assumps_dynamic_30)
+dnpv_jpmc <- npv_cost((-1)*jpmc_bdata['lhs', 'pay_reduc'],
+                      "Private Chase",
+                      base_terms_rhs,
+                      assumps_dynamic_30)
+
+df_stats <-df_stats %>% add_row('stat' = 'The average cost per 1% of payment reduction is () for GSE',
+                                'value' = dnpv_gse /(-100* gse_bdata['lhs', 'pay_reduc']),
+                                'unit' = '$/percentage point')
+
+df_stats <-df_stats %>% add_row('stat' = 'The average cost per 1% of payment reduction is () for Chase',
+                                'value' = dnpv_jpmc / (-100* jpmc_bdata['lhs', 'pay_reduc']),
+                                'unit' = '$/percentage point')
+
+dnpv_hamp_gse <- npv_cost((-1)*gse_bdata['lhs', 'pay_reduc'],
+                          "HAMP",
+                          base_terms_rhs,
+                          assumps_dynamic_30)
+
+dnpv_hamp_jpmc <- npv_cost((-1)*jpmc_bdata['lhs', 'pay_reduc'],
+                           "HAMP",
+                           base_terms_rhs,
+                           assumps_dynamic_30)
+
+df_stats <-df_stats %>% add_row('stat' = 'GSE is () of the cost of providing an equivalently-sized payment reduction in HAMP',
+                                'value' = dnpv_gse / dnpv_hamp_gse,
+                                'unit' = 'fraction GSE/HAMP')
+
+df_stats <-df_stats %>% add_row('stat' = 'Chase is () of the cost of providing an equivalently-sized payment reduction in HAMP',
+                                'value' = dnpv_jpmc / dnpv_hamp_jpmc,
+                                'unit' = 'fraction Chase/HAMP')
+
+##Add points to ggplot
+dnpv_point_jpmc <- data.frame('pay_red_cum' = jpmc_bdata['lhs', 'pay_reduc'], 'waterfall'= 'Private Chase', 'cost_npv' = dnpv_jpmc)
+dnpv_point_gse <- data.frame('pay_red_cum' = gse_bdata['lhs', 'pay_reduc'],'waterfall'= 'Private GSE' ,'cost_npv' = dnpv_gse)
+dnpv_point <- rbind(dnpv_point_gse, dnpv_point_jpmc)
+
+#Payments Owed version
+dnpv_gse_PO <- npv_cost((-1)*gse_bdata['lhs', 'pay_reduc'],
+                        "Private GSE",
+                        base_terms_rhs,
+                        assumps_pay_on_schd_30,
+                        dynamic=FALSE)
+dnpv_jpmc_PO <- npv_cost((-1)*jpmc_bdata['lhs', 'pay_reduc'],
+                         "Private Chase",
+                         base_terms_rhs,
+                         assumps_pay_on_schd_30,
+                         dynamic=FALSE)
+dnpv_point_jpmc_PO <- data.frame('pay_red_cum' = jpmc_bdata['lhs', 'pay_reduc'], 'waterfall'= 'Private Chase', 'cost_npv' = dnpv_jpmc_PO)
+dnpv_point_gse_PO <- data.frame('pay_red_cum' = gse_bdata['lhs', 'pay_reduc'],'waterfall'= 'Private GSE' ,'cost_npv' = dnpv_gse_PO)
+dnpv_point_PO <-  rbind(dnpv_point_gse_PO, dnpv_point_jpmc_PO)
+
+```
+
+```{r waterfall_plots, echo=FALSE}
+waterfall_plots <- list(list('waterfall'=df_waterfall, 'npv_points'=dnpv_point,
+                             'short_axis_name' = './out/diagnosis/compare_waterfalls_dynamic.pdf',
+                             'long_axis_name' = './out/diagnosis/compare_waterfalls_dynamic_60.pdf'),
+                        list('waterfall'=df_waterfall_PO, 'npv_points'=dnpv_point_PO,
+                             'short_axis_name' = './out/diagnosis/compare_waterfalls_PO.pdf',
+                             'long_axis_name' = './out/compare_waterfalls_PO_60.png'))
+
+#Finalise the plot
+for(item in waterfall_plots){
+  wf <- item$waterfall %>%
+    mutate(line=TRUE,
+           pay_red_cum = pay_red_cum*(-1),
+           type = factor(waterfall, levels=c("Efficient Default-minimizing",
+                                             "Principal Forgiveness",
+                                             "HAMP",
+                                             "HAMP Principal Reduction Alternative")))
+  points <- item$npv_points %>%
+    mutate(line=FALSE,
+           type=factor(waterfall,
+                       levels=c("Private Chase",
+                                "Private GSE")))
+  
+  plt <- ggplot() +
+    geom_line(data=wf,
+              aes(x=pay_red_cum, y=cost_npv,
+                  colour=type, linetype=type)) +
+    geom_point(colour="white", size=3,
+               data=points,
+               aes(x=pay_red_cum, y=cost_npv,
+                   fill=type, shape=type)) +
+    fte_theme() +
+    scale_y_continuous(labels = scales::dollar, limits=c(min(wf$cost_npv), max(wf$cost_npv))) +
+    scale_x_reverse(labels = scales::percent,
+                    breaks = seq(-0.40, 0, 0.1)) +
+    coord_cartesian(xlim = c(-0.42, 0)) +
+    labs(x = 'Change in Mortgage Payment',
+         y = 'Cost in NPV to Investors and Taxpayers') +
+    theme(legend.title = element_text(size=10,
+                                      color=brewer.pal("Greys", n=9)[7],
+                                      family="serif"),
+          legend.justification = c(0,1), legend.position = c(0,1),
+          legend.text = element_text(size=9),
+          legend.margin = margin(0, 0.1, 0, 0.1, unit="cm"),
+          legend.box.margin = margin(0, 0.1, 0.1, 0, unit="cm"),
+          legend.spacing.y = unit(0, "cm")) +
+    scale_colour_manual(name='Modification Type',
+                        values=c('navy','navy',
+                                 cbPalette_blue[1], cbPalette_blue[1])) +
+    scale_linetype_manual(name='Modification Type',
+                          values=c(1, 2, 4, 3)) +
+      scale_fill_manual(name=element_blank(),
+                      values=c(cbPalette_blue[1],
+                               cbPalette_blue[1])) +
+    scale_shape_manual(name=element_blank(),
+                       values=c(21, 24)) +
+    guides(linetype=guide_legend(order=1),
+           colour=guide_legend(order=1),
+           fill = guide_legend(order=2),
+           shape = guide_legend(order=2))
+  plt
+  ggsave(item$short_axis_name, width = wd, height = ht)
+  
+  plt <- plt + scale_x_reverse(labels = scales::percent_format(accuracy = 1L),
+                               breaks = seq(-0.70, 0, 0.1)) +
+    coord_cartesian(xlim = c(-0.70, 0))
+  plt
+  
+  if (item$long_axis_name == './out/diagnosis/compare_waterfalls_dynamic_60.pdf') {
+    plt_dynamic_60 <- plt
+  }
+  
+  ggsave(item$long_axis_name, width = 6, height = 4, device='png')
+}
+
+
+### Animation for slides of waterfall plot
+animate_list <- list(list(mods=c("Efficient Default-minimizing"),
+                          dots=FALSE, waterfall=df_waterfall,
+                          filename='./out/diagnosis/compare_waterfalls_animate_0.pdf'),
+                     list(mods=c("Efficient Default-minimizing", "Principal Forgiveness"),
+                          dots=FALSE, waterfall=df_waterfall, 
+                          filename='./out/diagnosis/compare_waterfalls_animate_1.pdf'),
+                     list(mods=c("Efficient Default-minimizing", "Principal Forgiveness","HAMP"),
+                          dots=FALSE, waterfall=df_waterfall, 
+                          filename='./out/diagnosis/compare_waterfalls_animate_2.pdf'),
+                    list(mods=c("Efficient Default-minimizing", "Principal Forgiveness",
+                                "HAMP", "HAMP Principal Reduction Alternative"),
+                          dots=FALSE, waterfall=df_waterfall, 
+                         filename='./out/diagnosis/compare_waterfalls_animate_2_alt.pdf'),
+                     list(mods=c("Efficient Default-minimizing", "Principal Forgiveness",
+                                 "HAMP","HAMP Principal Reduction Alternative"),
+                          dots=TRUE, waterfall=df_waterfall, 
+                          filename='./out/compare_waterfalls_animate_3.png'))
+
+plot_animate <- function(args){
+  #Select the right waterfalls
+  wf <- args$waterfall  
+  wf <- filter(wf, waterfall %in% args$mods)
+  wf <- wf %>%  mutate(line=TRUE,
+                       pay_red_cum = pay_red_cum*(-1))
+  
+  #Chase and GSE Points            
+  dnpv_point <- dnpv_point %>%
+    mutate(line=FALSE,
+           type=factor(waterfall,
+                       levels=c("Private Chase",
+                                "Private GSE")))
+  
+  #Plots
+  plt <- ggplot() + geom_line(data=wf, aes(x=pay_red_cum, y=cost_npv, colour=type, linetype=type)) 
+  if(args$dots==TRUE){
+    plt <- plt +geom_point(colour="white", size=3, data=dnpv_point, aes(x=pay_red_cum, y=cost_npv, fill=type, shape=type))
+  }
+  plt <- plt + fte_theme() +
+    scale_y_continuous(labels = scales::dollar, limits=c(min(df_waterfall$cost_npv),max(df_waterfall$cost_npv))) +
+    labs(x = 'Change in Mortgage Payment',
+         y = 'Cost in NPV to Investors and Taxpayers') +
+    theme(legend.title = element_text(size=10, hjust=0,
+                                      color=brewer.pal("Greys", n=9)[7],
+                                      family="serif"),
+          legend.justification = c(0,1), legend.position = c(0,1),
+          legend.text = element_text(size=9),
+          legend.margin = margin(0, 0.1, 0.0, 0.1, unit="cm"),
+          legend.box.margin = margin(0, 0.1, 0.1, 0, unit="cm"),
+          legend.spacing.y = unit(0, "cm")) +
+    scale_colour_manual(name='Modification Type',
+                        values=c('navy',
+                                 'navy',
+                                 cbPalette_blue[1],
+                                 cbPalette_blue[1])) +
+    scale_linetype_manual(name='Modification Type',
+                          values=c(1, 2, 4, 3)) +
+    scale_fill_manual(name=element_blank(),
+                      values=c(cbPalette_blue[1],
+                               cbPalette_blue[1])) +
+    scale_shape_manual(name=element_blank(),
+                       values=c(21, 24)) +
+    guides(linetype=guide_legend(order=1),
+           colour=guide_legend(order=1),
+           fill = guide_legend(order=2),
+           shape = guide_legend(order=2))
+  
+  plt <- plt + scale_x_reverse(labels = scales::percent_format(accuracy = 1L),
+                               breaks = seq(-0.7, 0, 0.1)) +
+    coord_cartesian(xlim = c(-0.7, 0))
+  plt
+  ggsave(args$filename, width = 6, height = 4, device='png')
+}
+
+for (args in animate_list){
+  plot_animate(args)
+}
+```
+### Social Value/Cost of Modifications
+We compare the value to investors and the value to society (based on expected reduction in foreclosures) of implementing the efficient modification waterfall (ED-M). 
+
+```{r social_value}
+dflt_assumps <- read_excel('./data/calc_npv_data/liquidation_probability.xlsx', sheet='lqd_prob')  %>% as.data.frame()
+p_fcl_def_base <- dflt_assumps$p_fcl_if_dflt  #Conditional probability of foreclosure
+p_fcl_def_pessimistic <- dflt_assumps$p_fcl_if_dflt_pessimistic 
+val_fcl <- dflt_assumps$val_fcl #Value in dollars of each avoided foreclosure
+
+#Social value of modification - nonlinear default response
+df <- data_frame('pay_red' = 0:70)
+
+df$p_dflt_5_year <-calc_mod_dflt(df$pay_red)
+df$p_dflt_2_year <- df$p_dflt_5_year / dflt_factor_5year
+df$dflt_reduc <- df$p_dflt_5_year[[1]] - df$p_dflt_5_year # Reduction in defaults in percentage points
+
+df$fcl_reduc <- df$dflt_reduc * p_fcl_def_base 
+df$fcl_reduc_pessimistic <- df$dflt_reduc * p_fcl_def_pessimistic 
+
+df$value <- df$fcl_reduc * val_fcl
+df$value_pessimistic <- df$fcl_reduc_pessimistic * val_fcl
+
+df$pay_red <- -1 * df$pay_red/100
+df$type <- rep('Social Value', nrow(df))
+
+#DF for comparison
+df_soc_val <- data_frame('pay_red' = double(),
+                         'value' = double(),
+                         'type' = character())
+df_soc_val_pessimistic <- df_soc_val
+
+df_soc_val <- rbind(df_soc_val, df %>% select(pay_red, value, type))
+df_soc_val_pessimistic <- rbind(df_soc_val_pessimistic, df %>% select(pay_red, value_pessimistic, type))
+df_soc_val_pessimistic <- rename (df_soc_val_pessimistic, value = value_pessimistic)
+df_soc_val_pessimistic$type <- rep('Social Value, Pessimistic', nrow(df_soc_val_pessimistic))
+
+#Add to waterfall
+df_waterfall_soc_val <- df_soc_val
+
+#Compare to ED-M waterfall
+df <- filter(df_waterfall, waterfall=='Efficient Default-minimizing')
+df <- df %>% select(pay_red_cum, cost_npv, type)
+df <- df %>% rename(pay_red =pay_red_cum, value = cost_npv )
+df$pay_red <- -1 * df$pay_red
+df_soc_val <-  rbind(df_soc_val, df)
+
+#Add 2 more bars (pessimistic recovery)
+df <- filter(df_waterfall_pessimistic, waterfall=='Efficient Default-minimizing')
+df$type <- rep('Efficient Default-minimizing, Pessimistic', nrow(df))
+df <- select(df, pay_red_cum, cost_npv, type)
+df <- df %>% rename(pay_red = pay_red_cum, value = cost_npv )
+df$pay_red <- df$pay_red * -1
+df_soc_val_pessimistic <- rbind(df_soc_val_pessimistic, df)
+df_soc_val_pessimistic <- rbind(df_soc_val_pessimistic, df_soc_val)
+
+###Find the break-even point between social value and EDM
+target_zero_soc_val_edm <- function(pct_pay_red){
+  cost_edm <-npv_cost(pct_pay_red/100, 'Efficient Default-minimizing', base_terms_rhs, assumps_dynamic_30)
+  dflt_reduc <- calc_mod_dflt(0) - calc_mod_dflt(pct_pay_red)
+  soc_val <- dflt_reduc * p_fcl_def_base  * val_fcl
+  return(cost_edm - soc_val)
+}
+edm_soc_val_breakeven <- uniroot(target_zero_soc_val_edm, c(1,100), maxiter=8)
+df_stats <-df_stats %>% add_row('stat' = 'The social value of a modification is equal to its cost under EDM at ()% pay red',
+                                'value' = edm_soc_val_breakeven$root,
+                                'unit' = '% Points')
+dflt_reduc <- calc_mod_dflt(0) - calc_mod_dflt(edm_soc_val_breakeven$root)
+df_stats <-df_stats %>% add_row('stat' = 'This has a cost/value of $() per modification',
+                                'value' = dflt_reduc * p_fcl_def_base  * val_fcl,
+                                'unit' = 'Dollars')
+
+
+#Make the plots
+df_soc_val <- df_soc_val %>%
+  mutate(line=TRUE,
+         type=factor(type,
+                     levels=c("Efficient Default-minimizing",
+                              "Social Value")))
+df_soc_val_pessimistic <- df_soc_val_pessimistic %>%
+  mutate(line=TRUE,
+         type=factor(type,
+                     levels=c("Efficient Default-minimizing",
+                              "Social Value",
+                              "Efficient Default-minimizing, Pessimistic",
+                              "Social Value, Pessimistic")))
+
+
+soc_val_plots <- list(list('df' = df_soc_val, 'filename'='./out/diagnosis/social_value.pdf'),
+                      list('df' = df_soc_val_pessimistic, 'filename'='./out/diagnosis/social_value_robust.pdf'))
+
+for(soc_val_plot in soc_val_plots){
+  if(soc_val_plot$filename == './out/diagnosis/social_value_robust.pdf'){
+    ylim_max <- 50000
+  }
+  else{
+    ylim_max <- 30000
+  }
+  
+  df <- soc_val_plot$df
+  plt <- ggplot() +
+    geom_line(data=df, aes(x=pay_red, y=value, colour=type, group=type, linetype=type)) +
+    fte_theme() +
+    scale_y_continuous(labels = scales::dollar, limits=c(min(df$value), ylim_max)) +
+    scale_x_reverse(labels = scales::percent,
+                    breaks = seq(-0.70, 0, 0.1)) +
+    coord_cartesian(xlim = c(-0.70, 0)) +
+    labs(x = 'Change in Mortgage Payment',
+         y = 'Investor NPV Cost/Social Value') +
+    theme(legend.title = element_text(size=10,
+                                      color=brewer.pal("Greys", n=9)[7],
+                                      family="serif"),
+          legend.justification = c(0,1), legend.position = c(0,1),
+          legend.text = element_text(size=9),
+          legend.margin = margin(0, 0.2, 0, 0.2, unit="cm"),
+          legend.box.margin = margin(0, 0.2, 0.2, 0, unit="cm"),
+          legend.spacing.y = unit(0, "cm")) +
+    scale_colour_manual(name='Modification Type',
+                        values=c('navy',
+                                 'navy',
+                                 cbPalette_blue[1],
+                                 cbPalette_blue[1])) +
+    scale_linetype_manual(name='Modification Type',
+                          values=c(1, 2, 4, 3)) +
+    scale_fill_manual(name=element_blank(),
+                      values=c(cbPalette_blue[1],
+                               cbPalette_blue[1])) +
+    scale_shape_manual(name=element_blank(),
+                       values=c(21, 24))
+  plt
+  ggsave(soc_val_plot$filename, width = 6, height = 4, device='png')
+}
+
+plt <- plt_dynamic_60 + 
+  geom_line(data=df_waterfall_soc_val,
+            aes(x=pay_red, y=value, colour='Social Value', linetype='Social Value')) +
+  scale_colour_manual(name='Modification Type',
+                      breaks=c("Efficient Default-minimizing",
+                               "Principal Forgiveness",
+                               "HAMP",
+                               "HAMP Principal Reduction Alternative",
+                               "Social Value"),
+                      values=c('navy',
+                               cbPalette_blue[1],
+                               cbPalette_blue[1],
+                               'navy',
+                               cbPalette_blue[1])) +
+  scale_linetype_manual(name='Modification Type',
+                        breaks=c("Efficient Default-minimizing",
+                                 "Principal Forgiveness",
+                                 "HAMP",
+                                 "HAMP Principal Reduction Alternative",
+                                 "Social Value"),
+                        values=c(1, 4, 3, 2, 5)) +
+  scale_x_reverse(labels = scales::percent_format(accuracy = 1L),
+                  breaks = seq(-0.6, 0, 0.1)) +
+  labs(x = 'Change in Mortgage Payment',
+         y = 'Cost in NPV to Investors and Taxpayers') +
+  coord_cartesian(xlim = c(-0.65, 0)) +
+   guides(linetype=guide_legend(order=1),
+           colour=guide_legend(order=1),
+           fill = guide_legend(order=2),
+           shape = guide_legend(order=2))
+plt
+ggsave('./out/compare_waterfalls_dynamic_60_social_value.png', width = 6, height = 4)
+
+```
+
+
+
+
+### Stats for text
+We want the following statistics:
+
+1. "Marginal cost" of payment reduction using maturity extension, and maximum reduction possible when extending to 40 years.
+2. Subsequently, "marginal cost" of payment reduction using temporary rate reduction, and maximum reduction possible when reducing to 2%
+3. What is the breakeven amount of payment reduction, and at what maturity/temporary rate reduction?
+4. What is the 'marginal cost' of forbearance?
+5. What is the marginal cost of principal reduction?
+6. Until what amount of payment reduction reduction does HAMP-PRA follow principal reduction (most inefficient policy)?
+7. What is the average cost of payment reduction per %-point for Chase?
+8. What is the average cost of payment reduction per %-point for GSEs?
+
+### Headline Stats and robustness checks
+```{r robustness_table, include=FALSE}
+diff_npv_hamp_eff <- function(pay_red, assumps, base_terms, recovery_mod = 'baseline', recovery_nomod = 'baseline'){
+  #Compares the cost of a payment reduction between HAMP and ED-M
+  # Args:
+  #   pay_red: payment reduction to be achieved
+  #   assumps: Initial assumptions about mtmval, prepayment, discounting, p_dflt, and recovery/liquidation rate
+  #   recovery_mod: Recovery scenario, for modded mortgages
+  #   recovery_nomod: Recovery scenario, for unmodded mortgages
+  # Returns:
+  #     Data frame with cost of achieving pay red with each mod, and the equal cost pay red possible with ED-M
+  
+  #Assumptions
+  assumps_hamp <- assumps
+  assumps_eff <- assumps
+  
+  #Cost of reaching pay_red target using HAMP and efficient waterfall
+  cost_hamp <- npv_cost(pay_red, 'HAMP', base_terms, assumps, recovery_mod = recovery_mod, recovery_nomod = recovery_nomod )
+  cost_eff <- npv_cost(pay_red, 'Efficient Default-minimizing', base_terms, assumps, recovery_mod = recovery_mod, recovery_nomod = recovery_nomod)
+  
+  # #Max pay red using efficient waterfall, at cost of HAMP?
+  target_zero <- function(target){
+    possible_cost_eff <- npv_cost(target,'Efficient Default-minimizing', base_terms, assumps_eff)
+    return(possible_cost_eff - cost_hamp)
+  }
+  max_eff_pay_red <- uniroot(target_zero, c(pay_red, 0.99), maxiter = 7, tol = 0.01)$root
+  
+  return(data_frame('pay_red' = pay_red, 'dflt_rate_base' = assumps$p_dflt, 'cost_hamp'=cost_hamp, 'cost_edm'=cost_eff, 'edm_eql_pay_red' = max_eff_pay_red))
+}
+
+### Robustness checks under various assumptions about default and liqudation
+assumps_lo_dflt <- assumps_dynamic_30
+assumps_lo_dflt$p_dflt <- 0.54
+
+assumps_hi_dflt <- assumps_dynamic_30
+assumps_hi_dflt$p_dflt <- 1.0
+
+baseline_hamp_pay_red <- 0.38
+dflt_reduc_iv_est <- 0.27 #1% payment reduction reduces 2-year dflt by 0.27 points
+
+df_robust <- data_frame('scenario' = character(),
+                        'pay_red' = double(),
+                        'dflt_rate_base' = double(),
+                        'cost_hamp' = double(),
+                        'cost_edm' = double(),
+                        'edm_eql_pay_red' = double())
+
+
+
+df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(baseline_hamp_pay_red, assumps_dynamic_30, base_terms_rhs) %>% mutate('scenario' = 'baseline'))
+df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(baseline_hamp_pay_red, assumps_lo_dflt, base_terms_rhs) %>% mutate('scenario' = 'low dflt'))
+df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(baseline_hamp_pay_red, assumps_hi_dflt, base_terms_rhs)%>% mutate('scenario' = 'high dflt'))
+df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(baseline_hamp_pay_red, assumps_hi_dflt, base_terms_rhs, recovery_mod = 'hi_lqd', recovery_nomod='hi_lqd')%>% mutate('scenario' = 'high dflt and liquidation'))
+# df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(0.36, assumps_hi_dflt, base_terms_rhs, recovery_mod = 'baseline', recovery_nomod='hi_lqd')%>% mutate('scenario' = 'high dflt and high liquidation without mod'))
+df_robust <- df_robust %>% bind_rows(diff_npv_hamp_eff(baseline_hamp_pay_red, assumps_dynamic_30, base_terms_5_pct)%>% mutate('scenario' = 'baseline, but r=5%'))
+
+df_robust$cost_diff <- df_robust$cost_hamp - df_robust$cost_edm
+df_robust$cost_diff_pct <- 100* df_robust$cost_diff / pmt_stream_rhs$upb[[1]]
+
+
+#If comparing different amounts of payment reduction
+df_robust$dflt_iv <- df_robust$dflt_rate_base - (dflt_reduc_iv_est * df_robust$pay_red * dflt_factor_5year)
+df_robust$dflt_invlogit <- calc_mod_dflt(100* df_robust$pay_red)
+df_robust$dflt_edm_eql_iv <- df_robust$dflt_rate_base - (dflt_reduc_iv_est * df_robust$edm_eql_pay_red * dflt_factor_5year)
+df_robust$dflt_edm_eql_invlogit <- calc_mod_dflt(100* df_robust$edm_eql_pay_red) 
+
+df_robust$diff_dflt_iv <- df_robust$dflt_iv - df_robust$dflt_edm_eql_iv
+df_robust$diff_dflt_invlogit <- df_robust$dflt_invlogit - df_robust$dflt_edm_eql_invlogit
+
+kable(df_robust)
+write.csv(df_robust, file='./out/diagnosis/npv_robustness.csv')
+
+
+
+###Stats for text
+#Stat for text
+cost_hamp <- filter(df_robust, scenario=='baseline') %>% select(cost_hamp) %>% unlist()
+cost_edm <- filter(df_robust, scenario=='baseline') %>% select(cost_edm)%>% unlist()
+
+df_stats <-df_stats %>% add_row('stat' = '(Compared to HAMP) Using the EDM structure we find that a 38% payment reduction can be achieved at $() lower cost',
+                                'value' = cost_edm - cost_hamp,
+                                'unit' = 'dollars')
+df_stats <-df_stats %>% add_row('stat' = 'With 1.8m total HAMP mods this suggests a potential inefficieny of $() billion ',
+                                'value' = (1.8e6 * (cost_edm - cost_hamp))/1e9,
+                                'unit' = 'dollars')
+
+edm_eql_pay_red_baseline <- df_robust %>% filter(scenario=='baseline') %>% select(edm_eql_pay_red) %>% unlist()
+edm_predict_dflt <- calc_mod_dflt(100*edm_eql_pay_red_baseline)
+
+df_stats <-df_stats %>% add_row('stat' = 'We fin(d that an additional () percentage points of payment reduction could have been achieved.',
+                                'value' = 100* (edm_eql_pay_red_baseline - baseline_hamp_pay_red),
+                                'unit' = '% points')
+
+diff_dflt_iv_baseline <-  df_robust %>% filter(scenario=='baseline') %>% select(diff_dflt_iv) %>% unlist()
+df_stats <-df_stats %>% add_row('stat' = '.translating into a () percentage point reduction in defaults',
+                                'value' = 100* diff_dflt_iv_baseline,
+                                'unit' = '% points')
+df_stats <-df_stats %>% add_row('stat' = 'Over 1.8m HAMP mods this implies () defaults could have been avoided',
+                                'value' = 1.8e6* diff_dflt_iv_baseline,
+                                'unit' = 'count')
+
+df_stats <-df_stats %>% add_row('stat' = 'The predicted default rate under the efficient mod is ()',
+                                'value' = 100 * edm_predict_dflt,
+                                'unit' = '% points')
+df_stats <-df_stats %>% add_row('stat' = 'As a ratio of HAMP default (performance data) it is ()',
+                                'value' = 100* edm_predict_dflt/45.6,
+                                'unit' = 'ratio')
+df_stats <-df_stats %>% add_row('stat' = 'As a ratio of HAMP default (predicted) it is ()',
+                                'value' = edm_predict_dflt/calc_mod_dflt(100 * baseline_hamp_pay_red),
+                                'unit' = 'ratio')
+
+
+
+
+investor_npv_baseline <- calc_npv_frm_terms(base_terms_rhs, assumps_dynamic_30)
+investor_npv_baseline_PO <- calc_npv_frm_terms(base_terms_rhs, assumps_pay_on_schd_30)
+investor_npv_edm <- investor_npv_baseline - npv_cost(baseline_hamp_pay_red, 'Efficient Default-minimizing', base_terms_rhs, assumps_dynamic_30)
+investor_npv_hamp <- investor_npv_baseline - npv_cost(baseline_hamp_pay_red, 'HAMP', base_terms_rhs, assumps_dynamic_30)
+
+df_stats <-df_stats %>% add_row('stat' = '(NPV_EMD - NPV_HAMP)/UPB_0 = () for 36% pay red',
+                                'value' = 100 * (investor_npv_edm - investor_npv_hamp) / base_terms_rhs$upb_0,
+                                'unit' = '% Points')
+df_stats <-df_stats %>% add_row('stat' = 'DIAGNOSTIC (NPV_EMD - NPV_HAMP)/NPV_NOMOD = () for 36% pay red',
+                                'value' = 100 * (investor_npv_edm - investor_npv_hamp) / investor_npv_baseline,
+                                'unit' = '% Points')
+df_stats <-df_stats %>% add_row('stat' = 'DIAGNOTIC (NPV_EMD - NPV_HAMP)/NPV_NOMOD_PO = () for 36% pay red',
+                                'value' = 100 * (investor_npv_edm - investor_npv_hamp) / investor_npv_baseline_PO,
+                                'unit' = '% Points')
+
+kable(df_stats)
+write.csv(df_stats, file = "./out/diagnosis/npv_stats.csv")
+
+```
+
+

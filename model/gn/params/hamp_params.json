@@ -1,0 +1,11 @@
+{
+    "hsg_own_p": 0.015, 
+    "collateral_constraint": 0.2, 
+    "maint": 0.025, 
+    "pra_forgive": 1.45, 
+    "int_rate": 0.02, 
+    "hsg_rent_p": 0.026, 
+    "annual_hp_growth": 0.009, 
+    "initial_price": 3.25, 
+    "baseline_debt": 4.88
+}

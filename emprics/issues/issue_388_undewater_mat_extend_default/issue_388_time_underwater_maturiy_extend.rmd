@@ -1,0 +1,669 @@
+---
+title: "issue_388_time_underwater_maturity_extend"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('../..')
+library('knitr')
+library('readxl')
+library('tibble')
+library('magrittr')
+library('reshape2')
+source('./prelim.R')
+source('./func/npv_calc_funcs.R')
+source('./func/yield_curve.R')
+source('./func/default_rate_assess.R')
+options(scipen=999, digits = 3)
+
+```
+
+## Goal
+We are concerned about additional default and foreclosure risk for mortgages with maturity extension. To address this, we perform three analyses comparing the mortgages at the 31% LTV RD. The control mortgage on the RHS of the cutoff receives a HAMP modification with little to no maturity extension, and the treatment mortgage on the LHS of the cutoff receives a private modification which has maturity extension. In order of increasing complexity, we evaluate the following:
+
+1. The mechanical increase in years underwater when extending maturity to 40 years. I.e., assuming that borrowers never default or prepay; the control mortgage takes X years to reach 100% LTV and the treated mortgage takes Y years to reach 100% LTV. Find X and Y.
+
+2. Incorporate prepayment risk to (1). Prepayment excludes the possibility of default and foreclosure. Weight the above valuations with the prepayment survival probability
+
+3. Incorporate default risk to (1). Assume that default + underwater -> foreclosure, but default + abovewater -> no foreclosure. 
+
+### Setup control/representative mortgage
+```{r hardcode_terms r, include=FALSE}
+setwd('../..')
+#Assumptions about property value growth
+prop_val_growth = 0.03 #From FHFA HPI growth 1991-2010, data/HPI_inflation.xlsx
+
+#Unmodified mortgage terms, from source csv
+df <- 
+  read_xls('./data/calc_npv_data/disclosed_20180622.xls', sheet='tbl_sum_stats') %>%
+  select(var, mean) %>% 
+  as.data.frame()
+
+rownames(df) <- df$var
+df <- df %>% select('mean') %>% t() %>% as.data.frame()
+
+ltv <- df$ltv
+mtmval_0 <- df$prop_val
+upb_0 <- (1/100) * ltv * mtmval_0
+mtmval_0 <- df$prop_val
+r_perm_0 <- df$rate 
+term_0 <- round(df$years_remain)
+terms_nomod <- 
+  list(r_temp = r_perm_0, r_perm = r_perm_0, term = term_0, upb_0 = upb_0, forbear = 0.0)
+pays_nomod <- 
+  pmt_stream(terms_nomod)
+pay_nomod <- pays_nomod$pay[[1]]
+
+#Discount rate assumptions
+yield_curves <- read_csv('./data/calc_npv_data/yield_curves.csv')
+disc_rate_30 <-  
+  yield_curves %>% 
+  filter(id == 'implied_gse') %>% 
+  select(rate_30) %>%
+  pull() %>% 
+  round(4)
+disc_vec_30 <- rep(1/(1+disc_rate_30), 40)
+
+
+
+########################
+#Account for different prin. reduc on each side of RD before applying waterfall
+df <- 
+  tribble(
+    ~side, ~prin_red, ~pmt_target_total,
+    #-----/-----------/----------------
+    'RHS', 19500, 0.135,
+    'LHS', 14000,0.31
+  )
+
+df <- df %>% 
+  mutate(upb_aft_forgive = upb_0 - prin_red)
+
+df <- df %>% 
+  mutate(terms_prin_red_only = upb_aft_forgive %>%
+                                  map(function(upb) list(upb_0 = upb,
+                                                         r_temp = r_perm_0,
+                                                         r_perm = r_perm_0,
+                                                         term = term_0,
+                                                         forbear = 0.0))
+         )
+         
+df_terms <- df
+
+#Stream of expected payments with principal reduction only
+df_pays <- data.frame(matrix(ncol = 4, nrow = 0))
+colnames(df_pays) <- c('pay', 'upb', 'year', 'side')
+
+for (x in c('LHS', 'RHS')){
+  df <- data.frame(df_terms %>%
+                        filter(side==x) %>%
+                        select(terms_prin_red_only) %>%
+                        extract2(1) %>%
+                        extract2(1) %>%
+                        pmt_stream())
+  df <- df %>% 
+    mutate(side = x,
+           year = row_number())
+  df_pays <- df_pays %>% rbind(df)
+}
+df_pays <- df_pays %>% 
+  mutate(treat = 'prin_red_only')
+
+#Pay reduc targets. Account for different prin. reduc on each side of RD
+df <- data.frame(matrix(ncol = 2, nrow = 0))
+for (x in c('LHS', 'RHS')){
+  pay_year <- df_pays %>% 
+    filter(year == 1, side == x) %>% 
+    select(pay, side)
+  df <- rbind(df, pay_year)
+}
+
+#Amount of payment reduction needed after principal forgiveness
+df_terms <- df_terms %>% 
+  full_join(df, by='side') %>% 
+  rename(pay_prin_red_only = pay) %>% 
+  mutate(target_pay = (1-pmt_target_total) * pay_nomod,
+         pay_red_percent = (pay_prin_red_only - target_pay)/pay_prin_red_only)
+
+#Terms to get to target (total) payment reduction
+get_terms <- function(x, data = df_terms){
+  row <- data %>% 
+    filter(side==x)
+  
+  terms <- row %>% 
+    select(terms_prin_red_only) %>% 
+    extract2(1) %>% 
+    extract2(1)
+  pmt_target <- row %>% 
+    select(pay_red_percent) %>% 
+    pull()
+  
+  if(x == 'LHS'){
+    wfall <-  'Private Chase'
+  } else if(x=='RHS'){
+    wfall <-  "HAMP"
+  }
+
+  out <-
+    wfall_mod_terms(
+      pmt_target,
+      wfall,
+      terms,
+      mtmval_0,
+      min_r_perm = 0.02
+    ) 
+}
+
+df_terms <- df_terms %>%
+  mutate(terms = side %>% map(get_terms))
+
+#Stream of expected payments (prin red + treatment)
+for (x in c('LHS', 'RHS')){
+  df <- data.frame(df_terms %>%
+                        filter(side==x) %>%
+                        select(terms) %>%
+                        extract2(1) %>%
+                        extract2(1) %>%
+                        pmt_stream())
+  df <- df %>% 
+    mutate(side = x,
+           year = row_number(),
+           treat = 'total')
+  df_pays <- df_pays %>% rbind(df)
+}
+
+pmt_stream_nomod <- pmt_stream(terms_nomod)
+df_pays <- rbind(df_pays,
+                 data.frame(pmt_stream_nomod) %>% 
+                   mutate(
+                     side = 'nomod',
+                     year = row_number(),
+                     treat = 'total'))
+
+```
+
+The control is the representative HAMP-modified mortgage on the RHS, and the treatment is the representative CHAMP-modified mortgage on the LHS. Mortgage terms are given below.  The unmodified mortgage characteristics at the cutoff are also included for reference. 
+```{r, echo=FALSE}
+#LHS
+terms_LHS <- df_terms %>% 
+  filter(side=='LHS') %>% 
+  select(terms) %>% 
+  extract2(1) %>% 
+  extract2(1)
+pay_ann_LHS <- df_pays %>% filter(side=='LHS', treat=='total') %>% select(pay) %>% min()
+pay_red_LHS <- df_terms %>%
+  filter(side=='LHS') %>%
+  select(pmt_target_total) %>%
+  extract2(1) %>%
+  extract2(1)
+
+#RHS
+terms_RHS <- df_terms %>% 
+  filter(side=='RHS') %>% 
+  select(terms) %>% 
+  extract2(1) %>% 
+  extract2(1)
+pay_ann_RHS <- df_pays %>% filter(side=='RHS', treat=='total') %>% select(pay) %>% min()
+pay_red_RHS <- df_terms %>%
+  filter(side=='RHS') %>%
+  select(pmt_target_total) %>%
+  extract2(1) %>%
+  extract2(1)
+
+df <-
+data.frame(rbind(
+   data.frame(terms_RHS, list(mod = 'RHS',
+                              annual_pay = pmt_stream(terms_RHS)$pay[[1]],
+                              pay_reduc = pay_red_RHS)),
+   data.frame(terms_LHS, list(mod = 'LHS',
+                              annual_pay = pmt_stream(terms_LHS)$pay[[1]],
+                              pay_reduc = pay_red_LHS)),
+   data.frame(terms_nomod, list(mod = 'None',
+                              annual_pay = pmt_stream(terms_nomod)$pay[[1]],
+                              pay_reduc = 0))))
+
+
+kable(df)
+```
+
+**Data Source:** These data are all in 'hamp-emp/data/calc_npv_data/disclosed_20180622.xls'. The terms for the unmodified mortgage are from sheet 'tbl_sum_stats'. The terms for the RHS (LHS) mortgages are generated by first applying a principal forgiveness of \$`r df_terms %>% filter(side=='RHS') %>% select(prin_red)`(\$`r df_terms %>% filter(side=='LHS') %>% select(prin_red)`), then applying a `r 100* df_terms %>% filter(side=='RHS') %>% select(pay_red_percent)`\% (`r 100 * df_terms %>% filter(side=='LHS') %>% select(pay_red_percent)`%) payment reduction to the unmodified mortgage using the HAMP(Chase) waterfall. The total amount of payment reduction is  `r 100*df_terms %>% filter(side=='RHS') %>% select(pmt_target_total)`\% (`r 100*df_terms %>% filter(side=='LHS') %>% select(pmt_target_total)`\%)
+
+The initial mark-to-market value of the property is \$`r mtmval_0`, and LTV is `r ltv`%. We assume that property value increases by `r 100*prop_val_growth`\% per year, which is the annualized growth rate in US Housing Price Index from Jan 1991 - Jan 2011 in the FHFA purchase-only data.
+
+
+## (1) Find breakeven point
+In this section, we compute the expected cash flows for the mortgages on each side of the 31\% RD cutoff. Then, we assume the borrower pays on time, and find the breakeven point where $LTV=100\%$ or, equivalently, where $UPB=MTMVAL$.
+
+
+```{r, include=FALSE}
+#Finding the first point in time where borrowers are scheduled to be above water
+
+#Account for growth in property values
+prop_vals <-  
+  data.frame(
+      prop_val = cumprod(rep(1+ prop_val_growth , 40)) * mtmval_0,
+      year = seq (1,40)
+    )
+
+df_pays <- df_pays %>% 
+  inner_join(prop_vals) %>% 
+  mutate(abvwater = upb < prop_val)
+
+#For each side of RD, find first year above water
+t_breakeven <- function(x, data = df_pays){
+  t_brkeven <- data %>% 
+    filter(side == x,
+           treat =='total',
+           abvwater == TRUE) %>%
+  select(year) %>%
+  min()
+} 
+
+df_terms <- df_terms %>% 
+  mutate(t_breakeven = map(side, t_breakeven) %>%
+           unlist())
+
+#For use in RMD text
+t_breakeven_RHS <- df_terms %>% 
+  filter(side=='RHS') %>% 
+  select(t_breakeven) %>% 
+  extract2(1)
+  
+t_breakeven_LHS <- df_terms %>% 
+  filter(side=='LHS') %>% 
+  select(t_breakeven) %>% 
+  extract2(1)
+  
+
+```
+
+The control (RHS) mortgage has a term of `r df_terms %>% filter(side == 'RHS') %>% terms() %>% extract2(1) %>% use_series(term)` years, and if the borrower repays on time their LTV is below 100% by year `r t_breakeven_RHS`. The treatment (LHS) mortgage has a term of `r df_terms %>% filter(side == 'LHS') %>% terms() %>% extract2(1) %>% use_series(term)` years, and has LTV <100% in year `r t_breakeven_LHS`. The falling series in the figure below reflect the declining unpaid principal, while the rising series reflects the appreciating property value.
+
+```{r, include=FALSE}
+### Plot the point where borrowers become abovewater
+df <- df_pays %>% 
+  filter(treat=='total',
+         side=='LHS' | side =='RHS') %>% 
+  select(year, side, upb) %>% 
+  rename(key = side, value = upb)
+  
+df <- prop_vals %>% 
+  transmute(value = prop_val,
+            key = rep('prop_val', 40),
+            year = year) %>% 
+  rbind(df)
+
+df <- df %>% 
+  mutate(key = case_when(key == 'LHS' ~ 'Unpaid balance: treatment',
+                         key == 'RHS' ~ 'Unpaid balance: control',
+                         key == 'prop_val' ~ 'Property Value'))
+
+
+plt <- ggplot(df, aes(year, value, color = key)) +
+  geom_line() +
+  scale_color_manual(values = cbPalette_set2[1:3]) +
+  scale_y_continuous(labels = scales::dollar, limits =c(150000,275000)) +
+  scale_x_continuous(breaks =c(2,4,6,8,10), limits =c(0,10)) +
+  fte_theme() +
+  theme(legend.title=element_blank(),
+        legend.justification=c(0,1),
+        legend.position=c(0,0.25)) +
+  xlab('Years Since Modification') +
+  ylab("Value") 
+```
+
+```{r, echo=FALSE,warning=FALSE}
+plt
+```
+
+
+
+## (2) Add prepayment risk.
+We now consider prepayment risk. If a mortgage is prepaid it cannot subsequently be defaulted on. For the `r t_breakeven_RHS` year (RHS) and  `r t_breakeven_LHS` year (LHS) periods, we compute the probability of surviving (not prepaying) before the end of the period.
+
+Notes:   
+
+ - We model prepayment as a function of the stream of expected UPBs and the initial property value.  
+ - Our prepayment model in npv_calc_funcs.R assumes a 3% per year property appreciation 
+
+```{r, echo=FALSE}
+get_prepay_vec <- function(x){
+  upbs <- df_pays %>% 
+    filter(side == x,
+           treat== 'total') %>% 
+    select(upb) %>% 
+    unlist()
+  
+  prepays <- calc_prepayment(upbs, mtmval_0)
+  
+  df <- data.frame('prepays' = prepays) %>% 
+    mutate(year=seq(1,40),
+           side = x)
+}
+
+test = get_prepay_vec('LHS')
+
+#Df of prepayments and cumulative survival 
+df_prepays <- rbind(
+  get_prepay_vec('LHS'),
+  get_prepay_vec('RHS')
+  
+)
+
+df_prepays <- df_prepays %>%
+  mutate(p_survive = 1 - prepays)
+
+df_prepays <- df_prepays %>% 
+  group_by(side) %>% 
+  mutate(survive_cum = cumprod(p_survive)) %>% 
+  ungroup()
+
+#For use in RMD text
+p_survive_cum_LHS <- df_prepays %>% 
+  filter(side == 'LHS',
+         year == t_breakeven_LHS) %>% 
+  select(survive_cum) %>% 
+  extract2(1)
+
+p_survive_cum_RHS <- df_prepays %>% 
+  filter(side == 'RHS',
+         year == t_breakeven_RHS) %>% 
+  select(survive_cum) %>% 
+  extract2(1)
+```
+
+
+There is a very low prepayment rate in the first few years - On the RHS the estimated prepayment rate is less than 1\% per year for the first 8 years. On the LHS it is less than 1\% per year for the first 13 years. The cumulative prepayment survival probabilities are:   
+
+ - For RHS mortgages with a term of `r df_terms %>% filter(side=='RHS') %>% select(terms) %>% extract2(1) %>% extract2(1) %>% use_series(term)` years, by breakeven in year `r t_breakeven_RHS`, `r 100* p_survive_cum_RHS %>% round(3)`\% of mortgages have survived.  
+ - For LHS mortgages with a term of `r df_terms %>% filter(side=='LHS') %>% select(terms) %>% extract2(1) %>% extract2(1) %>% use_series(term)` years, by breakeven in year `r t_breakeven_LHS`, `r 100*p_survive_cum_LHS %>% round(3)`\% of mortgages have survived.   
+ 
+<!-- To reweight the 'time underwater' figures from section (1), we evaluate: -->
+
+<!-- \begin{align*} -->
+<!-- \text{timeUnderwater}_{\text{weighted}}  = \sum_{t=0}^{t=t_{\text{breakeven}}} P(Survive_{cum}) -->
+<!-- \end{align*} -->
+
+```{r include=FALSE}
+# t_uw_weighted_RHS <- cumsum(prepays$survive_cum_RHS)[t_breakeven_RHS]
+# t_uw_weighted_LHS <- cumsum(prepays$survive_cum_LHS)[t_breakeven_LHS]
+```
+ 
+## (3) Add default risk
+
+### HAMP Performance Data
+
+To incorporate default risk, we make use of the HAMP performance data to extrapolate defaults out to 30 or 40 years. Specifically, we use the following data:  
+
+1. HAMP performance data, reporting cumulative default rates of HAMP recipients from 3 months to 5 years  
+2. 2-year (24 month) default rates on either side of the 31\% RD from JPMCI data 
+
+We use (1) to generate a series of scaling factors $f_t$. Let
+\begin{align*}
+	d^{perf}_t &= \text{Default rate at month }t\text{ in the HAMP performance data}\\
+\end{align*}
+Then the scaling factors $f_t$ are:
+\begin{align*}
+	f_{24} &= 1\\
+	f_t &= \frac{d^{perf}_t}{d^{perf}_{24}}\\
+\end{align*}
+and the approximated defaults from 3 months to 5 years are $d^{LHS}_t$ and $d^{RHS}_t$:
+\begin{align*}
+	d^{LHS}_t &= f_t d^{LHS}_{24}\\
+	d^{RHS}_t &= f_t  d^{RHS}_{24}
+\end{align*}
+
+Next, for each of the HAMP performance data, the RHS series, and the LHS series we separately fit a model where where $d_t = \beta Log(t)$. See below for a figure.
+
+```{r hamp_default_perf, fig.width=10,fig.height=6, include=FALSE}
+setwd('../..')
+#https://www.treasury.gov/initiatives/financial-stability/reports/Documents/1Q17%20MHA%20Report%20Final.pdf
+#Default rates of 2010 HAMP Tier 1 Modifications (Page 8)
+hamp_perf_data <- 
+  tribble(
+    ~year, ~dflts_perf,
+    #------/------------
+    0.25, 0.017,
+    0.5,  0.067,
+    1.0,  0.156,
+    1.5,  0.227,
+    2.0,  0.281,
+    2.5,  0.326,
+    3.0,  0.366,
+    3.5,  0.394,
+    4.0,  0.416,
+    4.5,  0.436,
+    5.0,  0.456
+  )
+
+#2- year default rates from 31% RD 
+df <- 
+  read_xls('./data/calc_npv_data/disclosed_20180622.xls', sheet='tbl_local_linear') %>% 
+  select('Type' = pos,'dflt_post' = delin_ever90)
+
+#use ratio of t-year/2-year default in perf. data to estimate 5 years of dflt
+scale_fac_dflt <- 
+  hamp_perf_data$dflts_perf/
+  (hamp_perf_data %>% filter(year==2) %>% pull(dflts_perf))
+
+hamp_perf_data <-  
+  hamp_perf_data %>%
+  mutate(dflts_RHS = (df %>% filter(Type=='TRUE') %>% pull(dflt_post)) *scale_fac_dflt,
+         dflts_LHS = (df %>% filter(Type=='FALSE') %>% pull(dflt_post)) *scale_fac_dflt)
+
+
+### Fit log model ###
+df_predicts <- tibble(year = seq(0,40))
+
+get_dflts_predict <- function(dflt_type, data = hamp_perf_data){
+  model <- data %>%
+    select(dflt_type, year) %>% 
+    rename(dflt = dflt_type) %>%
+    
+    lm(dflt ~ log(year), data = .)
+  predicts <- predict(model ,newdata = df_predicts %>% select(year))
+}
+
+
+for (x in c('dflts_perf', 'dflts_RHS', 'dflts_LHS')){
+  df_predicts <- df_predicts %>% 
+    mutate(!!x := get_dflts_predict(x))   ###CRAZY NON-STANDARD EVAL HERE
+}
+
+### Plot cumulative default probabilities ###
+df_lines <- df_predicts %>%
+  rename("HAMP performance data" = dflts_perf,
+         "Defaults: treatment" = dflts_LHS,
+         "Defaults: control" = dflts_RHS) %>% 
+  gather(key = type, value = dflt, -year) 
+
+df_pts <- hamp_perf_data %>% 
+  transmute(year,
+            dflt = dflts_perf,
+            type = 'HAMP performance data')
+
+for (x in c('LHS', 'RHS')){
+  colname = ifelse(x=='LHS',
+                "Defaults: treatment",
+                "Defaults: control")
+  
+  t_breakeven = df_terms %>% 
+    filter(side == x) %>% 
+    select(t_breakeven) %>% 
+    extract2(1)
+  dflt <- df_lines %>% 
+    filter(year == t_breakeven,
+           type == colname) %>% 
+    select(year, type, dflt) 
+    
+  df_pts <- df_pts %>% 
+    rbind(dflt)
+}
+
+plt <- ggplot() +
+  geom_line(data = df_lines, aes(x = year, y= dflt, group = type, color = type)) +
+  geom_point(data = df_pts, aes(x = year, y= dflt, group = type, color = type, shape = type)) +
+  scale_color_manual(values = c(cbPalette_set2[2], cbPalette_set2[3], cbPalette_set2[1])) +
+  scale_shape_manual(values = c(17, 17, 16))+
+  fte_theme() +
+  scale_x_continuous(breaks =c(2,4,6,8), limits =c(0,8)) +
+  xlab('Years Since Modification') +
+  ylab("Cumulative Default Rate") +
+  theme(legend.title=element_blank(),
+        legend.justification=c(0,1),
+        legend.position=c(0.0,0.9)) 
+```
+
+```{r, echo=FALSE, warning=FALSE}
+plt
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+### Comparing default reduction at different times
+df <- hamp_perf_data %>% 
+  filter(year == 2) %>% 
+  select(-dflts_perf) %>% 
+  mutate(type = 'Data')
+
+df <- df_predicts %>% 
+  filter(year %in% c(2,4,6)) %>% 
+  select(-dflts_perf) %>% 
+  mutate(type = 'Predicted') %>% 
+  rbind(df)
+
+df_temp <- tribble(
+  ~year, ~dflts_RHS, ~dflts_LHS, ~type,
+  #----/-----------/------------/-------
+  NA,
+  df_predicts %>% filter(year == t_breakeven_RHS) %>% select(dflts_RHS) %>% extract2(1), 
+  df_predicts %>% filter(year == t_breakeven_LHS) %>% select(dflts_LHS) %>% extract2(1),
+  'When Underwater'
+)
+
+df_dflt_reduc <- rbind(df, df_temp) %>% 
+  arrange(type) %>% 
+  mutate(dflt_reduc_percent_points = 100*(dflts_RHS - dflts_LHS))
+```
+
+### Defaults when underwater
+
+We use a double-trigger model where a 'default', as defined in the previous subsection, can only result in foreclosure if the borrower is also underwater at that point in time. In practice, this means that if a HAMP recipient's payment schedule has them abovewater by year $t$, we assume that the default rate after year $t$ is zero. The triangles in the plot above indicate when the mortgage is expected to be abovewater. As such, the foreclosure rate to the right of each triangle is zero.
+
+Ignoring prepayment, for the control (RHS) mortgage the default rate by year `r t_breakeven_RHS` (when LTV =100\%) is `r 100 * df_dflt_reduc %>% filter(type == 'When Underwater') %>% select(dflts_RHS)`\%. For the treatment (LHS) mortgage the default rate by year `r t_breakeven_LHS` (when LTV =100\%) is `r 100* df_dflt_reduc %>% filter(type == 'When Underwater') %>% select(dflts_LHS)`\%. This implies that treatment reduces default by `r  df_dflt_reduc %>% filter(type == 'When Underwater') %>% select(dflt_reduc_percent_points)` percentage points over the lifetime of the mortgage. This reduction corresponds to the vertical distance between the orange and blue triangles.
+
+### How much are the gains in default reduction eroded?
+```{r, echo=FALSE }
+kable(df_dflt_reduc)
+```
+
+The table above presents the default reduction between treatment (LHS) and control (RHS) at different times after modification. The 'Data' row compares defaults in the JPMCI data from the RD, the 'Predicted' rows compare the predicted cumulative defaults by year $t$ from the log model fitted above; the 'When Underwater' row compares the predicted cumulative default by year `r t_breakeven_LHS` for the treatment group and year `r t_breakeven_RHS` for the control group.
+
+### Comments on default model
+FOR PG I mentioned in slack that I had concerns about extrapolating the default model. This was before we incorporated house price appreciation, and when borrowers only became abovewater around years 17-21. I am much less concerned about the default extrapolation now that we only use the extrapolation for a few years outside of our data sample.
+
+Another potential concern is the methodology in constructing default rates for the LHS and RHS sample during months 3-60. My construction here assumes that borrowers on the LHS or RHS default at some constant fraction/multiple of the rate at which borrowers in the HAMP performance data do. Since we believe that payment reduction on the LHS has a strong (stronger?) effect in the short-term than the long-term, the assumption here might be invalid and bias (right side) of the blue curve downwards.
+
+
+## (4) Default and Prepayment risk.
+
+Using the log functional form for cumulative default from the previous section, we can back out a default rate in every year by taking a derivative. In combination with the sequence of predicted annual prepayment rates, we can compute foreclosure and survival probabilities over the lifetime of the control and treatment mortgages.
+
+Letting:
+\begin{align*}
+	f_t &= \text{Probability of foreclosure in year }t\\
+	d_t &= \text{Default rate (predicted in previous section) in year }t\\
+	p_t &= \text{Prepayment rate in year }t\\
+	S_t &= \text{Fraction of surviving (not prepaid or defaulted) mortgages in year }t\\
+	t_{above} &= \text{Period where the borrower first becomes abovewater}\\
+\end{align*}
+
+We have:
+
+\begin{align*}
+f_t &= \begin{cases}
+          d_t[(1-p_t)]  &\quad \text{if } t<t_{above}\\
+          0  &\quad \text{if } t>=t_{above}\\
+        \end{cases}\\
+S_0 &= 1 \\
+S_t &= (1-f_{t-1} - p_{t-1})S_{t-1} \text{if } t<t_{above}\\
+\end{align*}
+
+That is to say, the foreclosure rate at time $t$ is the default rate multiplied by the proportion of mortgages that do not prepay in period $t$; mortgages surviving in period $t$ equals to mortgages surviving in $t-1$ less losses to prepayment or foreclosure in $t-1$. Ultimately, the losses to foreclosure is the statistic we are interested in, which would be:
+
+\begin{align*}
+\text{Total Foreclosure Losses} &= \sum_{t=0}^{t=T}f_tS_t\\
+                                &= \sum_{t=0}^{t<t_{above}}f_tS_t\\
+\end{align*}
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+### Get the default PDFs from the esimated log CDFs
+get_dflt_pdf <- function(t, side, data = hamp_perf_data){
+  ### Cumulative default at period t = c + (beta * log(t))
+  ###Differentiate to get P(default) at period t = beta/t
+  if(side=='LHS'){
+    dflt_type <- "dflts_LHS"
+  }else if(side == 'RHS'){
+    dflt_type <- "dflts_RHS"
+  }
+  
+  model <- data %>%
+    select(dflt_type, year) %>% 
+    rename(dflt = dflt_type) %>% 
+    lm(dflt ~ log(year), data = .)
+  
+  beta <- model$coefficients[2] 
+  out <- (beta/t)
+}
+
+df <- rbind(
+  data.frame(year = seq(1,40,1), side = 'RHS'),
+  data.frame(year = seq(1,40,1), side = 'LHS')
+  ) %>% 
+  group_by(side) %>% 
+  mutate(p_dflt = get_dflt_pdf(year, side = side)) %>% 
+  ungroup()
+
+######### XXX The cumulative defaults implied by the (discrete) year-to-year dflt probs here do not match the fitted cumulative defaults ####
+df <- full_join(df,
+                df_prepays %>%
+                  select(year, side, prepays),
+                by=c('year', 'side'))
+df <- df %>% 
+  mutate(p_fcl = p_dflt * (1-prepays),
+         p_survive = 1 - p_fcl - prepays)
+df <- df %>% 
+  group_by(side) %>% 
+  mutate(
+         cum_survive_tminus1 = lag(cumprod(p_survive)),
+         cum_survive_tminus1 = cum_survive_tminus1 %>% replace(1,1),
+         dflt_abs = p_fcl * cum_survive_tminus1,
+         prepays_abs = prepays * cum_survive_tminus1,
+         cum_fcl = cumsum(dflt_abs),
+         cum_prepays = cumsum(prepays_abs)) %>% 
+  ungroup()
+         
+#For RMD
+cum_fcl_LHS <- df %>% 
+  filter(side == 'LHS', year == t_breakeven_LHS) %>% 
+  select(cum_fcl)
+  
+cum_fcl_RHS <- df %>% 
+  filter(side == 'RHS', year == t_breakeven_RHS) %>% 
+  select(cum_fcl)
+```
+Using this methodology, the cumulative losses to foreclosure for control mortgages (RHS) is `r 100*cum_fcl_RHS`\% by year `r t_breakeven_RHS`. For treated mortgages (LHS) it is `r 100*cum_fcl_LHS`\% by year `r t_breakeven_LHS`. While the treatment effect of `r 100 * (cum_fcl_RHS - cum_fcl_LHS)` percentage points is similar to the result in section 3, where we only incorporate default, the absolute values of default losses differ significantly. This discrepancy is explained below.
+
+### Comparison: Default only vs. Default + Prepayment
+
+Recall that the reduced default from treatment calculated in section 3 is `r df_dflt_reduc %>% filter(type == 'When Underwater') %>% select(dflt_reduc_percent_points)` percentage points. This should be a lower bound on the reduced default induced by treatment for two reasons:
+
+1. The default risk extrapolation likely overestimates the default rate in out years, and overstates it more in year `r t_breakeven_LHS` than in year `r t_breakeven_RHS`.
+
+2. Incorporating prepayment increases the default reduction advantage of treatment. Through year `r t_breakeven_RHS`, only `r 100 * df %>% filter(year == t_breakeven_RHS, side == 'RHS') %>% select(cum_prepays)`\% of untreated mortgages prepaid. Since prepayment precludes the possibility of foreclosure, incorporating it would reduce the foreclosure rate of untreated mortgages by a small amount. However, through year  `r t_breakeven_LHS`, `r 100 * df %>% filter(year == t_breakeven_LHS, side == 'LHS') %>% select(cum_prepays)`\%  of treated mortgages prepaid. Incorporating this prepayment would reduce the foreclosure rate of treated mortgages by a larger amount than in the untreated case.
+
+This section (section 4) attempts to incorporate prepayment with default and resolve ambiguity number (2) above. However, I have some doubts about this procedure. Backing out the annual default rate (PDF) from the predicted cumulative default rate (CDF) creates a discrepancy: reconstructing the cumulative default rate by taking the cumulative product of the annual default rate significantly understates cumulative default (relative to the predicted values). This is partially driven by taking a discrete multiplicative product; I'm not sure whether this drives *all* of the effect.
+
+In addition, this procedure gains us very little in terms of accuracy. The prepayment rates are so minuscule that incorporating them should change results minimally. The difference between the result in section 3 and the one here might be driven largely by the discrepancy due to taking the discrete product of annual default rates.

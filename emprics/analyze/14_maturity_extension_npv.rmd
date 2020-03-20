@@ -1,0 +1,459 @@
+---
+title: "What are the effects on investor loan NPV of mortgage modifications (term extensions)"
+author: "Xian Ng"
+date: "Jan 24, 2018"
+output: pdf_document
+---
+
+
+```{r setup}
+knitr::opts_knit$set(root.dir = '../') 
+
+```
+
+```{r load functions}
+#Initial load packages and data
+source('./func/prelim_local.R')
+
+#Functions
+source('./func/npv_calc_funcs.R')
+source('./func/yield_curve.R')
+```
+
+
+```{r load_jpmc}
+#Stream of payments data
+df <- read_xls('./data/mtg_rd_ac2019-03-22.xls', sheet='tbl_loan_evolve_chase')
+pmt_data <- data_frame(year = seq(1,40))
+for(name_set in list(c('P_lhs_pre'  ,   'lhs', 'anl_bef_pi'),
+                      c('P_lhs_post',   'lhs', 'anl_aft_pi'),
+                      c('P_rhs_pre' ,   'rhs', 'anl_bef_pi'),
+                      c('P_rhs_post',   'rhs', 'anl_aft_pi'),
+                      c('upb_lhs_pre' , 'lhs', 'ln_bef_mdfc_upb_amt_beg'),
+                      c('upb_lhs_post', 'lhs', 'ln_aft_mdfc_upb_amt_beg'),
+                      c('upb_rhs_pre' , 'rhs', 'ln_bef_mdfc_upb_amt_beg'),
+                      c('upb_rhs_post', 'rhs', 'ln_aft_mdfc_upb_amt_beg'))){
+  
+pmt_data <- full_join(pmt_data, df %>% filter(var==name_set[3]) %>% select(name_set[2], 'year') %>% setNames (c(name_set[1], 'year')), by='year')
+}
+
+# Borrower Data (on each side of 31% RD)
+df <- read_xls('./data/mtg_rd_ac2019-03-22.xls', sheet='tbl_local_linear')
+df <- df %>% select('Type' = pos, 'inc' = cplt_loan_brw_incm_am, 
+                    'mtmval' = curr_prop_aprs_val_am, 'pay_mo_pre' = pri_loan_prin_int_am,
+                    'pay_reduc' = pi_due_chg_ratio, 'dflt_post' = delin_ever90)
+                          
+df <- mutate(df, 'Type' =df$Type  %>%lapply((function(pos){
+                                        if(pos=='FALSE'){return('lhs')}
+                                        if(pos=='TRUE'){return('rhs')}}))
+                                            %>% unlist() )
+df$dti_pre <- df$pay_mo_pre / df$inc
+df$pay_mo_post <- df$pay_mo_pre * (1 + df$pay_reduc)
+df$dti_post <- df$pay_mo_post/df$inc
+
+bdata <- df %>% as.data.frame()
+rownames(bdata) = bdata$Type
+
+mtmval_lhs = bdata['lhs','mtmval']
+mtmval_rhs = bdata['rhs','mtmval']
+```
+
+# NPV Model - Valuation
+
+### Valuation if cure
+1. Value the loan in the no-mod, cure, case. We simplify the equation of page 41 of the treasury NPV model documentation in the following ways
+    - All calculations collapsed from monthly to annual
+    - Ignore servicing fee of interest
+    - Set MDLQ (months delinquent) to zero
+2. The simplified equation is then $$NPV_{Cures} =\sum_{i=1}^T \frac{1}{(1+\delta)^i} \left[ (UPB_{i-1} - P_i)(s_{i-1} - s_{i}) + (P_i + I_i)s_{i-1} \right]$$ where
+    - $UPB_i$ is the unpaid principal payment at time $i$
+    - $P_i$ is the (annual) principal payment for period $i$
+    - $I_i$ is the (annual) interest payment for period $i$
+    - $s_i$ is the survival probability of the loan; I.e., the probability that the loan is not prepaid within the first $i$ periods. If the prepayment probability in any period $k$ is given by $PREPAY_k$, then the survival probability in period $i$ is given by $\prod_{k=1}^{i}(1-PREPAY_k)$.
+
+3. The required statistics for this calculation are then:
+    - $T$ - Remaining term of the loan
+    - $P_i$ from $i=1$ to $i=T$ - the stream of payments towards the principal
+    - $I_i$ from $i=1$ to $i=T$ - the stream of payments towards interest
+    - Series of $UPB_i$ form $i=1$ to $i=T$. Note that for fixed-rate mortgage this series is trivially calculated given the series of $P_i$
+    - $PREPAY_i$ from $i=1$ to $i=T-1$ in order to calculate the survival probabilities
+These statistics are needed for both the LHS and RHS (both sides of the 31% cutoff)
+
+```{r value_cure}
+disc_vec_411 <- rep(1/(1+0.0411), 40)
+prepay_vec_5 <- rep(0.05, 40)
+pays_jpmc <-  list(pmt_data$P_lhs_pre, pmt_data$P_lhs_post, pmt_data$P_rhs_pre, pmt_data$P_rhs_post)
+upbs_jpmc <-  list (pmt_data$upb_lhs_pre, pmt_data$upb_lhs_post, pmt_data$upb_rhs_pre, pmt_data$upb_rhs_post)
+```
+'NPV if Cure' before and after modification for borrowers on the LHS is `r sprintf("$ %6.2f", calc_npv_cure(pays_jpmc[[1]],upbs_jpmc[[1]], prepay_vec_5, disc_vec_411))` and `r sprintf("$ %6.2f", calc_npv_cure(pays_jpmc[[2]],upbs_jpmc[[2]], prepay_vec_5, disc_vec_411))`, assuming a constant 5\% prepayment rate and a constant 4.11\% discount rate.
+
+'NPV if Cure' before and after modification for borrowers on the RHS is `r sprintf("$ %6.2f", calc_npv_cure(pays_jpmc[[3]],upbs_jpmc[[3]], prepay_vec_5, disc_vec_411))` and `r sprintf("$ %6.2f", calc_npv_cure(pays_jpmc[[4]],upbs_jpmc[[4]], prepay_vec_5, disc_vec_411))`, assuming a constant 5\% prepayment rate and a constant 4.11\% discount rate.
+    
+### Valuation if Default
+We make the following assumptions of mortgages that go into default:
+
+- 69\% of defaults go into foreclosure. Foreclosure results in investor losing 56\% of the initial UPB  
+
+- 31\% of defaults self-cure; the investor takes no loss
+
+```{r value_default}
+mtmval_lhs <- bdata['lhs','mtmval']
+mtmval_rhs <- bdata['rhs','mtmval']
+
+```
+Again assume a discount rate of 4.11\% and a prepayment rate of 5\%.
+
+On the LHS with an average mark-to-market valuation of \$`r mtmval_lhs` the value if default for pre- and post-mod are `r sprintf("$ %6.2f", calc_npv_dflt(pays_jpmc[[1]],upbs_jpmc[[1]], prepay_vec_5, disc_vec_411, mtmval_lhs))` and `r sprintf("$ %6.2f", calc_npv_dflt(pays_jpmc[[2]],upbs_jpmc[[2]], prepay_vec_5, disc_vec_411, mtmval_lhs))` respectively.
+
+On the RHS with an average mark-to-market valuation of \$`r mtmval_rhs` the value if default for pre- and post-mod are `r sprintf("$ %6.2f", calc_npv_dflt(pays_jpmc[[3]],upbs_jpmc[[3]], prepay_vec_5, disc_vec_411, mtmval_rhs))` and `r sprintf("$ %6.2f", calc_npv_dflt(pays_jpmc[[4]],upbs_jpmc[[4]], prepay_vec_5, disc_vec_411, mtmval_rhs))` respectively.
+
+#Probability of Default and Prepayment
+### NPV Model -  Ex Ante Foreclosure Probability (DEPRECATED)
+
+NOTE: WORK USING TREASURY MODEL IS DEPRECATED - REPLACE WITH CHANWOOL'S ESTIMATE USING LOGIT FUNCTIONAL FORM AND RESULTS FROM 31% RD
+
+Following the Treasury NPV model, these probabilities only need to be computed once. Set the baseline five-year default probability target for people on the RHS (pre-mod DTI>31%) to 45.6\%
+The simplified Treasury NPV model for predicting (re)default ignoring MTMLTV, credit scores, terms for initial DTI~>31\%:
+$$
+\begin{aligned}
+P(redefault) &= InvLogit(Z_{redefault})\\
+Z_{redefault} &= B_0 + B_{10}*DTI\_START + B_{14}*Log(1+\Delta DTI) +\\ &B_{15}*\Delta DTI + B_{16}*max(0, \Delta DTI-5) + B_{17}*max(0, \Delta DTI-15)
+\end{aligned}
+$$
+
+
+```{r prob_dflt}
+############### New estimated default rates from 31% RD results #####################
+#Payment Reduction from 31% RD
+lhs_pay_reduc <- - 100* bdata['lhs', 'pay_reduc']
+rhs_pay_reduc <- - 100* bdata['rhs', 'pay_reduc']
+
+#Observed and predicted 2/5 year default rates
+
+def_5year_pre <- 0.73
+dflt_factor_5year <- 0.456 / 0.281
+def_2year_pre <- def_5year_pre/dflt_factor_5year
+
+def_2year_lhs_post <- bdata['lhs', 'dflt_post']
+def_2year_rhs_post <- bdata['rhs', 'dflt_post']
+
+def_lhs_pre <-  def_5year_pre
+def_lhs_post <- dflt_factor_5year * def_2year_lhs_post
+def_rhs_pre <-  def_5year_pre
+def_rhs_post <- dflt_factor_5year * def_2year_rhs_post
+
+#Sete Different sets of default assumptions
+dflts_base = list('lhs_pre' = def_lhs_pre, 'lhs_post' = def_lhs_post,
+                  'rhs_pre' = def_rhs_pre, 'rhs_post' = def_rhs_post)
+dflts_none = list('lhs_pre' = 0.0,         'lhs_post' = 0.0,
+                  'rhs_pre' = 0.0,         'rhs_post' = 0.0)
+
+##Payment reduction has small or large effect on default (bounds of 95% CI)
+dflt_reduc_se <- 0.07
+dflts_hi   = list('lhs_pre' = def_lhs_pre, 'lhs_post' = (def_2year_lhs_post +(1.96 * dflt_reduc_se * lhs_pay_reduc/100)) * dflt_factor_5year,
+                  'rhs_pre' = def_rhs_pre, 'rhs_post' = ((def_2year_rhs_post +(1.96 * dflt_reduc_se * rhs_pay_reduc/100)) * dflt_factor_5year))
+
+large_treat_effect <- (0.27 +1.96*0.07)/100 #default reduction from 1% decrease in payments
+dflts_lo = list('lhs_pre' = def_lhs_pre, 'lhs_post' = (def_2year_lhs_post -(1.96 * dflt_reduc_se * lhs_pay_reduc/100)) * dflt_factor_5year,
+                'rhs_pre' = def_rhs_pre, 'rhs_post' = ((def_2year_rhs_post -(1.96 * dflt_reduc_se * rhs_pay_reduc/100)) * dflt_factor_5year))
+```
+~~We calibrate the constant term in the Treasury NPV model, using the 5-year default probability of 45.6\% on the RHS. The calibrated constant term in the simplified model is (deprecated). Using this calibrated constant, the predicted default probabilties are~~:
+
+We follow the Treasury approach and esimate default probabilities using a logit functional form, using the 31\% RD results as data. The default rates below are 5-year default rates. We convert from 2-year default rates to 5-year default rate using a conversion factor of `r dflt_factor_5year %>% round(3)`. This factor is derived by dividing `r 0.456`/`r def_2year_rhs_post%>% round(3)` which are the 5-year default rate from HAMP performance data and the 2-year HAMP default rate from the 31\% RD.
+
+1. LHS, pre-mod: `r def_lhs_pre %>% round(3)`
+2. LHS, post-mod: `r def_lhs_post %>% round(3)`
+3. RHS, pre-mod: `r def_rhs_pre %>% round(3)`
+4. RHS, post-mod: `r def_rhs_post %>% round(3)`
+
+
+### Ex Post Foreclosure Probability
+The 5-year default rate on the RHS is 45.6%. On the LHS, we have
+$$
+\begin{aligned}
+\text{LHS} &= \text{(two-year default on RHS - treatment effect at two years)} * \text{(5-year default rate / 2-year default rate)} \\
+&= (28.1-4.7)*(45.6/28.1)=37.97\%
+\end{aligned}
+$$
+
+
+### What are the Prepayment rates?
+The expected prepayment rates of the mortgages are required in valuing NPV if cure. The predicted prepayment rates depend on the series of unpaid mortgage balance, and the mark-to-market value of the property. We assume that the mark-to-market value increases by 3\% per year from the initial value.
+``` {r prepay_calcs}
+prepay_lhs_pre <- calc_prepayment(pmt_data$upb_lhs_pre,  bdata['lhs','mtmval'])
+prepay_lhs_post <- calc_prepayment(pmt_data$upb_lhs_post,  bdata['lhs','mtmval'])
+prepay_rhs_pre <- calc_prepayment(pmt_data$upb_rhs_pre,  bdata['rhs','mtmval'])
+prepay_rhs_post <- calc_prepayment(pmt_data$upb_rhs_post,  bdata['rhs','mtmval'])
+
+#Prepayment rates for robustness
+prepay_none = rep(0.0, 40)
+prepay_lo_val = 0.0091
+prepay_lo = rep(prepay_lo_val, 40)
+prepay_hi_val = 0.0681
+prepay_hi = rep(prepay_hi_val, 40)
+
+prepays_base <- list('lhs_pre' =prepay_lhs_pre, 'lhs_post'=prepay_lhs_post,
+                     'rhs_pre' =prepay_rhs_pre, 'rhs_post'=prepay_rhs_post)
+prepays_none <- list('lhs_pre' =prepay_none, 'lhs_post'=prepay_none,
+                     'rhs_pre' =prepay_none, 'rhs_post'=prepay_none)
+prepays_lo <- list('lhs_pre' =prepay_lo, 'lhs_post'=prepay_lo,
+                   'rhs_pre' =prepay_lo, 'rhs_post'=prepay_lo)
+prepays_hi <- list('lhs_pre' =prepay_hi, 'lhs_post'=prepay_hi,
+                   'rhs_pre' =prepay_hi, 'rhs_post'=prepay_hi)
+```
+
+
+# Treatment Effects and dNPV between treatments
+### Discount Rates
+We choose a number of different discount rates to perform robustness checks. These rates are based off 30-year Treasury bond yields and the yield on a hypothetical 40-year bond.
+```{r disc_rates}
+yield_curves <- read_csv('./data/calc_npv_data/yield_curves.csv')
+#Treasury yield curve
+rate_30_T <- yield_curves %>% filter(id == 'implied_treasury') %>% select(rate_30) %>% pull()
+rate_40_T <- yield_curves %>% filter(id == 'implied_treasury') %>% select(rate_40) %>% pull()
+
+#Swaps yield curve
+rate_30_swaps <- yield_curves %>% filter(id == 'actual_swaps') %>% select(rate_30) %>% pull()
+rate_40_swaps <- yield_curves %>% filter(id == 'actual_swaps') %>% select(rate_40) %>% pull()
+
+#Baseline rates
+rate_30 <-  yield_curves %>% filter(id == 'implied_gse') %>% select(rate_30) %>% pull()
+rate_40_lo <- rate_30 + (rate_40_swaps - rate_30_swaps)
+rate_40_med <- yield_curves %>% filter(id == 'implied_gse') %>% select(rate_40) %>% pull()
+rate_40_hi <- rate_30 + (rate_40_T - rate_30_T)
+
+#Rates for post-treatment with mixture of maturities
+rate_lhs <-     0.8*rate_40_med + 0.2*rate_30
+rate_lhs_lo <-  0.8*rate_40_lo + 0.2*rate_30
+rate_lhs_hi <-  0.8*rate_40_hi + 0.2*rate_30
+rate_lhs_T <-   0.8*rate_40_T + 0.2*rate_30_T
+rate_lhs_swaps <-   0.8*rate_40_swaps + 0.2*rate_40_swaps
+
+rate_rhs <-     0.2*rate_40_med + 0.8*rate_30
+rate_rhs_lo <-  0.2*rate_40_lo + 0.8*rate_30
+rate_rhs_hi <-  0.2*rate_40_hi + 0.8*rate_30
+rate_rhs_T <-   0.2*rate_40_T + 0.8*rate_30_T
+rate_rhs_swaps <-   0.2*rate_40_swaps + 0.8*rate_30_swaps
+
+#Lists of discount rates
+deltas_base     <- list('lhs_pre' = rate_30, 'lhs_post'=rate_lhs,    'rhs_pre' = rate_30, 'rhs_post'=rate_rhs)
+deltas_lo       <- list('lhs_pre' = rate_30, 'lhs_post'=rate_lhs_lo, 'rhs_pre' = rate_30, 'rhs_post'=rate_rhs_lo)
+deltas_hi       <- list('lhs_pre' = rate_30, 'lhs_post'=rate_lhs_hi, 'rhs_pre' = rate_30, 'rhs_post'=rate_rhs_hi)
+deltas_treasury <- list('lhs_pre' = rate_30_T, 'lhs_post'=rate_lhs_T, 'rhs_pre' = rate_30_T, 'rhs_post'=rate_rhs_T)
+deltas_swaps    <- list('lhs_pre' = rate_30_swaps, 'lhs_post'=rate_lhs_swaps, 'rhs_pre' = rate_30_swaps, 'rhs_post'=rate_rhs_swaps)
+deltas_411      <- list('lhs_pre' = 0.0411 , 'lhs_post'=0.0411,      'rhs_pre' = 0.0411,  'rhs_post'=0.0411)
+```
+
+### What discount rate makes investors equally well off under either treatment?
+What is the discount rate that makes the treatments on the LHS and RHS equally valuable to the investor? Since treatments, default probabilities, and value if foreclosed are unchanged from above, the change in the discount rate only affects the calculation by changing the NPV if the loan cures. We can solve this problem numerically.
+
+Below, we construct a table with the NPV for the 4 cases, the difference in post-mod NPV, and the required discount rate that makes investors indifferent between either modification
+```{r val_to_investor, include=FALSE}
+rd_31_results <- matrix(nrow=0,ncol=4)
+colnames(rd_31_results)  <-  c('name', 'assumps', 'dNPV', 'Break-Even Discount Rate')
+rd_31_results <- as_tibble(rd_31_results)
+
+rd_31_verbose <- matrix(nrow=0,ncol=6)
+colnames(rd_31_verbose)  <-  c('assumps', 'NPV_lhs_pre', 'NPV_lhs_post', 'NPV_rhs_pre', 'NPV_rhs_post', 'Breakeven Delta')
+rd_31_verbose <- as_tibble(rd_31_verbose)
+
+calc_results_31 <- function(deltas, prepays, defaults,
+                            title, short_title,
+                            recovery='baseline', verbose=FALSE){
+  delta_lhs_pre <- deltas$lhs_pre
+  delta_rhs_pre <- deltas$rhs_pre
+  delta_lhs_post <- deltas$lhs_post
+  delta_rhs_post <- deltas$rhs_post
+  
+  lhs_pre_args <- list('pays_vec' = pmt_data$P_lhs_pre, 'upb_vec' = pmt_data$upb_lhs_pre,
+                       'prepay_vec' = prepays$lhs_pre, 'p_dflt' = defaults$lhs_pre,
+                       'disc_vec' = rep(1/(1+delta_lhs_pre),40), 'mtmval' = bdata['lhs', 'mtmval'])     
+  
+  lhs_post_args <- list('pays_vec' = pmt_data$P_lhs_post, 'upb_vec' = pmt_data$upb_lhs_post,
+                        'prepay_vec' = prepays$lhs_post, 'p_dflt' = defaults$lhs_post,
+                        'disc_vec' = rep(1/(1+delta_lhs_post),40),'mtmval' = bdata['lhs', 'mtmval'])      
+  
+  rhs_pre_args <- list('pays_vec' = pmt_data$P_rhs_pre, 'upb_vec' = pmt_data$upb_rhs_pre,
+                       'prepay_vec' = prepays$rhs_pre, 'p_dflt' = defaults$rhs_pre,
+                       'disc_vec' = rep(1/(1+delta_rhs_pre),40),'mtmval' = bdata['rhs', 'mtmval'])   
+  
+  rhs_post_args <- list('pays_vec' = pmt_data$P_rhs_post, 'upb_vec' = pmt_data$upb_rhs_post,
+                        'prepay_vec' = prepays$rhs_post,'p_dflt' = defaults$rhs_post,
+                        'disc_vec' = rep(1/(1+delta_rhs_post),40),'mtmval' = bdata['rhs', 'mtmval'])
+  #Results
+  brkeven_delta <- uniroot(npv_treat_diff, c(0,1),
+                           lhs_pre_args, lhs_post_args,
+                           rhs_pre_args, rhs_post_args,
+                           recovery=recovery, find_delta=TRUE)
+  npvs <- npv_treat_diff(0.0, lhs_pre_args, lhs_post_args,
+                            rhs_pre_args, rhs_post_args,
+                            recovery=recovery, find_delta=FALSE)
+  dnpv <- (npvs$lhs_post - npvs$lhs_pre) - (npvs$rhs_post - npvs$rhs_pre)
+  
+  #Store results
+  rd_31_results = add_row(rd_31_results, 'name'= short_title,  'assumps'= title,
+                           'dNPV' = dnpv, 'Break-Even Discount Rate' = brkeven_delta$root)
+  assign('rd_31_results', rd_31_results, envir=.GlobalEnv)
+  
+  rd_31_verbose = add_row(rd_31_verbose, 'assumps'= title,
+                    'NPV_lhs_pre' = npvs$lhs_pre, 'NPV_lhs_post' = npvs$lhs_post,
+                    'NPV_rhs_pre' = npvs$rhs_pre, 'NPV_rhs_post' = npvs$rhs_post,
+                    'Breakeven Delta' = brkeven_delta$root)
+  assign('rd_31_verbose', rd_31_verbose, envir=.GlobalEnv)
+  if(verbose==TRUE){
+    return(list(brkeven_delta, results))  
+  }
+}
+################## Perform dNPV calculations ############################
+### Run calculations ###
+# Baseline
+calc_results_31(deltas_base, prepays_base, dflts_base, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=73/38/73/46',
+                short_title = 'Baseline')
+
+#Changing default rates from baseline
+# calc_results_31(deltas_base, prepays_base, dflts_none, recovery='baseline',
+#                 title ='d=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=None',
+#                 short_title='No Default')
+calc_results_31(deltas_base, prepays_base, dflts_hi, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=73/45/73/49%',
+                short_title = 'Low Default Reduction')
+calc_results_31(deltas_base, prepays_base, dflts_lo, recovery='baseline',
+                title ='d=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=63/32/73/43%',
+                short_title = "High Default Reduction")
+
+#Changing recovery assumptions
+calc_results_31(deltas_base, prepays_base, dflts_base, recovery='optimistic',
+                title ='d=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=base, Recovery=optimistic',
+                short_title ='Optimistic Recovery')
+calc_results_31(deltas_base, prepays_base, dflts_base, recovery='pessimistic',
+                title ='d=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=base, Recovery=pessimistic',
+                short_title ='Pessimistic Recovery')
+
+#Adjusting 40-year discount rate
+calc_results_31(deltas_lo, prepays_base, dflts_base, recovery='baseline',
+                title ='d=3.84/3.86% for 30/40 year. Prepay=Predicted. Defs=base',
+                short_title='Flatter Yield Curve (Actual Swaps Spread)')
+calc_results_31(deltas_hi, prepays_base, dflts_base, recovery='baseline',
+                title ='d=3.84/4.19% for 30/40 year. Prepay=Predicted. Defs=base',
+                short_title = 'Steeper Yield Curve (Implied Treasury Spread)')
+calc_results_31(deltas_treasury, prepays_base, dflts_base, recovery='baseline',
+                title ='d=3.17/3.52% for 30/40 year. Prepay=Predicted. Defs=base',
+                short_title = 'Discount at Treasury Rates')
+calc_results_31(deltas_swaps, prepays_base, dflts_base, recovery='baseline',
+                title ='d=3.00/3.02% for 30/40 year. Prepay=Predicted. Defs=base',
+                short_title = 'Discount at Swap Rates')
+
+#Change prepayment rates       
+# calc_results_31(deltas_base, prepays_none, dflts_base, recovery='baseline',
+#                 title = 'd=3.84/4.16% for 30/40 year. Prepay=None. Defs=base',
+#                 short_title='No Prepayment')
+calc_results_31(deltas_base, prepays_lo, dflts_base, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=0.91%/year. Defs=base',
+                short_title = 'Low Prepayment')
+calc_results_31(deltas_base, prepays_hi, dflts_base, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=6.8%/year. Defs=base',
+                short_title = 'High Prepayment')
+
+
+
+```
+
+### Hardcode payments owed
+```{r, echo=FALSE, include=FALSE}
+#Discount 4.11% everywhere
+rd_31_results <- rd_31_results %>% add_row('name' = 'Payments Owed',
+                                           'assumps' = 'Hardcoded',
+                                           'dNPV' = -2168,
+                                          'Break-Even Discount Rate' = 0.0359)
+
+# calc_results_31(deltas_411, prepays_none, dflts_none, recovery='baseline',
+#                 title = 'd=4.11/4.11% for 30/40 year. Prepay=None. Defs=None',
+#                 short_title ='Payments Owed')
+calc_results_31(deltas_411, prepays_none, dflts_base, recovery='baseline',
+                title = 'd=4.11/4.11% for 30/40 year. Prepay=None. Defs=base',
+                short_title ='Payments Owed, with default')
+calc_results_31(deltas_base, prepays_none, dflts_base, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=None. Defs=base',
+                short_title = 'Payments Owed, with default and yield curve')
+calc_results_31(deltas_base, prepays_base, dflts_base, recovery='baseline',
+                title = 'd=3.84/4.16% for 30/40 year. Prepay=Predicted. Defs=base',
+                short_title = 'Baseline')
+
+```
+
+
+
+
+```{r results, echo=FALSE}
+rd_31_results$dnpv_pct <- 100*rd_31_results$dNPV / rd_31_verbose[[1, "NPV_rhs_post"]]
+rd_31_results <- rd_31_results %>% select(name, assumps, dNPV, dnpv_pct, `Break-Even Discount Rate`)
+colnames(rd_31_results) <-c('Scenario', 'Assumptions', "Change in NPV($)","Change in NPV(%)", "Breakeven Discount Rate")
+kable(rd_31_results, caption='dNPV and Break-Even Discount Rate', digits = c(0,0,0,2, 4))
+
+latex_out <- rd_31_results %>% select("Scenario","Change in NPV($)", "Breakeven Discount Rate", "Change in NPV(%)")
+latex_out[,2] <- round(latex_out[,2], 0)
+latex_out[,3] <- round(100 * latex_out[,3], 2)
+latex_out[,4] <- round(latex_out[,4], 2)
+colnames(latex_out) <- c('Scenario', 'dNPV($)', 'Break-even Discount Rate (%)', "Change in NPV(%)" )
+
+
+write.csv(latex_out, './out/pareto_table.csv')
+
+```
+
+
+```{r wealth_inc_pay_on_sch, include=FALSE}
+###What is the wealth increase for borrowers assuming paying on schedule?###
+#Setup
+pay_lhs_pre <- pmt_data$P_lhs_pre
+pay_lhs_post <-  pmt_data$P_lhs_post
+pay_rhs_pre <- pmt_data$P_rhs_pre
+pay_rhs_post <-  pmt_data$P_rhs_post
+
+upb_lhs_pre <- pmt_data$upb_lhs_pre
+upb_lhs_post <- pmt_data$upb_lhs_post
+upb_rhs_pre <- pmt_data$upb_rhs_pre
+upb_rhs_post <- pmt_data$upb_rhs_post
+
+
+dw_disc_rates <- c(0.02, 0.0411, 0.0822, 0.16)
+df <- tibble(dw_disc_rates)
+colnames(df)[1] <- 'disc_rates'
+
+# Calculate change in wealth for borrower
+calc_bor_dw_lhs <- function(d){
+  disc_vec <- rep(1/(1+d),40)
+  pre <- calc_npv_cure(pay_lhs_pre, upb_lhs_pre, prepay_none, disc_vec)
+  post <- calc_npv_cure(pay_lhs_post, upb_lhs_post, prepay_none, disc_vec)
+  pre - post
+}
+
+calc_bor_dw_rhs <- function(d){
+  disc_vec <- rep(1/(1+d),40)
+  pre <- calc_npv_cure(pay_rhs_pre, upb_rhs_pre, prepay_none, disc_vec)
+  post <- calc_npv_cure(pay_rhs_post, upb_rhs_post, prepay_none, disc_vec)
+  pre - post
+}
+
+df <- df %>% rowwise() %>%  mutate(dw_lhs = calc_bor_dw_lhs(disc_rates))
+df <- df %>% rowwise() %>%  mutate(dw_rhs = calc_bor_dw_rhs(disc_rates))
+df[,'dw_lhs-dw_rhs'] <- df[,'dw_lhs'] -df[,'dw_rhs']
+
+write.csv(latex_out, './out/diagnosis/d_wealth_pay_on_schd.csv')
+
+```
+
+```{r}
+kable(df, digits = c(0,0,0,0))
+```
+
+
+
+
+
+
+
+
+
+
