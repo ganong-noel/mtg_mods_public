@@ -133,3 +133,7 @@ To view the packages versions used or to change the install location, modify the
 - `analyze/15_npv_cost_benefit.Rmd` conducts NPV cost-benefit analysis for different modification types.
 - `analyze/16_maturity_extension_default.R` estimates the long-term default rate arising from maturity extension.
 
+# Model
+The model subdirectory is forked from Heterogeneous Agents Resources and toolKit (HARK) beta release - June 25, 2016.
+
+All additions by Ganong and Noel can be found in the `/gn/` subdirectory. Explanation of the model code can be found in the README in that directory. 
