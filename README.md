@@ -7,7 +7,7 @@ This repo is a partial replication kit for Ganong and Noel (2020). This README h
 1. Full repkit for model analysis of principal reduction (Section 6.2)
 1. Table and variable manifest for JPMCI data (Section 5, various appendix items)
 
-It will be archived as openicpsr 118367
+It will be archived as openicpsr 118401
 
 ---
 # Part 1: `empirics` directory
