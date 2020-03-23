@@ -14,6 +14,8 @@ It will be archived as openicpsr 118401
 
 We are able to release the code for this section, but not the proprietary Transunion credit bureau data. We are glad to work with anyone who seeks to access these data.
 
+This section of the analysis uses code (that is public and included in this repo) and proprietary Transunion credit bureau data (that is not public and therefore cannot be included in this repo). The Transunion file is stored on a Harvard server. To obtain permission from Transuion to access these data, email Erikka.Leighton@transunion.com. We grant any researchers with appropriate approval to conduct research using these files. We describe the code below.
+
 `master.R` is the master file for the code. The `environment` argument in the first line may be specified as:
 
 1. 'Odyssey' - Runs the analysis requiring proprietary data on the Odyssey server 
@@ -98,7 +100,7 @@ pip install -r requirements.txt
 
 # Part 3: JPMCI table and variable manifest
 
-We are not able to release code or data for this section. We are able to release a list of tables and key variables. We are glad to work with anyone who seeks to access these data.
+The code and data used in this section were prepared in JPMorganChase Insitute's (JPMCI) secure computing facilities. Due to JPMCI's rules on access and confidentiality, the programming code and analysis files cannot be made available publicly. The analysis files and programming code created by the authors will be available within JPMCI's secure computing facilities until 2022, and can be requested by researchers with approved projects (email institute@jpmchase.com). We grant any researchers with appropriate approval to conduct research on JPMCI's secure computing facilities access to these files. Below, we list the tables needed to replicate the analysis as well as some key variables.
 
 ## Effect of payment reduction on default (Section 5)
 
