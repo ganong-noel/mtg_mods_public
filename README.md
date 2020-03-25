@@ -100,7 +100,7 @@ pip install -r requirements.txt
 
 # Part 3: JPMCI table and variable manifest
 
-The code and data used in this section were prepared in JPMorganChase Insitute's (JPMCI) secure computing facilities. Due to JPMCI's rules on access and confidentiality, the programming code and analysis files cannot be made available publicly. The analysis files and programming code created by the authors will be available within JPMCI's secure computing facilities until 2022, and can be requested by researchers with approved projects (email institute@jpmchase.com). We grant any researchers with appropriate approval to conduct research on JPMCI's secure computing facilities access to these files. Below, we list the tables needed to replicate the analysis as well as some key variables.
+The code and data used in this section were prepared in JPMorganChase Insitute's (JPMCI) secure computing facilities. The data for this project are proprietary and confidential to JPMorgan Chase & Co, but may be obtained with Data Use Agreements as an employee or contractor with the JPMorgan Chase Institute. Independent researchers interested in access to the data may contact institute@jpmchase.com to inquire about Fellowship opportunities. Fellowship opportunities are dependent on availability of openings. We grant any researchers with appropriate approval to conduct research on JPMCI's secure computing facilities access to these files. Below, we list the tables needed to replicate the analysis as well as some key variables.
 
 ## Effect of payment reduction on default (Section 5)
 
