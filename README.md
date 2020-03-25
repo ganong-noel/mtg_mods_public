@@ -22,7 +22,7 @@ This section of the analysis uses code (that is public and included in this repo
 2. 'Local' - Runs the NPV comparison analysis on the local machine
 
 ## Odyssey
-
+This code runs using R 3.3.3. The packages used for the analysis can be installed with appropriate version numbers using the script `install_packages.R`. The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_RCC.csv`
 - `build/01_load_Npv`. `build/02_load_1stLien.R`, `build/03_clean_Npv.R`, and `build/04_clean_1stLien.R` load and clean HAMP NPV and loan modification file from [the U.S. Department of Treansury](https://www.treasury.gov/initiatives/financial-stability/reports/Pages/mha_publicfile.aspx).
 - `build/05_make_hamp_matching_file.R` creates the HAMP file that will later be matched to the TransUnion data.
 - `analyze/01_analyze_takeup.R` analyzes modification takeup status.
@@ -53,7 +53,7 @@ This section of the analysis uses code (that is public and included in this repo
 
 ## Local
 
-This project uses R package `versions` to reproduce results. By default, the `snapshot_pkgs_local` toggle at the top of the file is set to `FALSE`. If set to `TRUE` (and `environment == 'Local'`), the script will attempt to install the required versions of packages into the first element of .libPaths().
+This project uses R package `versions` to reproduce results. By default, the `snapshot_pkgs_local` toggle at the top of the file is set to `FALSE`. If set to `TRUE` (and `environment == 'Local'`), the script will attempt to install the required versions of packages into the first element of .libPaths(). The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_local.csv`. The R version is 3.6.2. 
 
 To view the packages versions used or to change the install location, modify the `install_dates()` call near the bottom of `master.R`
 
