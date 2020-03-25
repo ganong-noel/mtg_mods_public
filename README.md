@@ -12,8 +12,6 @@ It will be archived as openicpsr 118401
 ---
 # Part 1: `empirics` directory
 
-We are able to release the code for this section, but not the proprietary Transunion credit bureau data. We are glad to work with anyone who seeks to access these data.
-
 This section of the analysis uses code (that is public and included in this repo) and proprietary Transunion credit bureau data (that is not public and therefore cannot be included in this repo). The Transunion file is stored on a Harvard server. To obtain permission from Transuion to access these data, email Erikka.Leighton@transunion.com. We grant any researchers with appropriate approval to conduct research using these files. We describe the code below.
 
 `master.R` is the master file for the code. The `environment` argument in the first line may be specified as:
@@ -22,7 +20,7 @@ This section of the analysis uses code (that is public and included in this repo
 2. 'Local' - Runs the NPV comparison analysis on the local machine
 
 ## Odyssey
-This code runs using R 3.3.3. The packages used for the analysis can be installed with appropriate version numbers using the script `install_packages.R`. The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_RCC.csv`
+REQUIREMENTS: This code runs using R 3.3.3. The packages used for the analysis can be installed with appropriate version numbers using the script `install_packages.R`. The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_RCC.csv`
 - `build/01_load_Npv`. `build/02_load_1stLien.R`, `build/03_clean_Npv.R`, and `build/04_clean_1stLien.R` load and clean HAMP NPV and loan modification file from [the U.S. Department of Treansury](https://www.treasury.gov/initiatives/financial-stability/reports/Pages/mha_publicfile.aspx).
 - `build/05_make_hamp_matching_file.R` creates the HAMP file that will later be matched to the TransUnion data.
 - `analyze/01_analyze_takeup.R` analyzes modification takeup status.
@@ -53,7 +51,7 @@ This code runs using R 3.3.3. The packages used for the analysis can be installe
 
 ## Local
 
-This project uses R package `versions` to reproduce results. By default, the `snapshot_pkgs_local` toggle at the top of the file is set to `FALSE`. If set to `TRUE` (and `environment == 'Local'`), the script will attempt to install the required versions of packages into the first element of .libPaths(). The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_local.csv`. The R version is 3.6.2. 
+REQUIREMENTS: This project uses R package `versions` to reproduce results. By default, the `snapshot_pkgs_local` toggle at the top of the file is set to `FALSE`. If set to `TRUE` (and `environment == 'Local'`), the script will attempt to install the required versions of packages into the first element of .libPaths(). The packages are also listed in CSV form in the following location: `empirics/r_packages/R_packages_local.csv`. The R version is 3.6.2. 
 
 To view the packages versions used or to change the install location, modify the `install_dates()` call near the bottom of `master.R`
 
@@ -70,7 +68,7 @@ The model subdirectory is forked from Heterogeneous Agents Resources and toolKit
 
 All new scripts by Ganong and Noel can be found in the `/gn/` subdirectory. 
 
-The scripts in this directory use python 2.7. Full details on the replication environment are below.
+REQUIREMENTS: The scripts in this directory use python 2.7. Full details on the replication environment are below.
 
 ## Scripts 
 1. `gn/cons_model.py` - Implements a partial equilibrium life-cycle model with optimizing households to predict consumption in the presence of housing debt and collateral constraints. Can be run from terminal or in IDE. See Appendix D for details.
