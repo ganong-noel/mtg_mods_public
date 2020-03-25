@@ -70,6 +70,8 @@ The model subdirectory is forked from Heterogeneous Agents Resources and toolKit
 
 All new scripts by Ganong and Noel can be found in the `/gn/` subdirectory. 
 
+The scripts in this directory use python 2.7. Full details on the replication environment are below.
+
 ## Scripts 
 1. `gn/cons_model.py` - Implements a partial equilibrium life-cycle model with optimizing households to predict consumption in the presence of housing debt and collateral constraints. Can be run from terminal or in IDE. See Appendix D for details.
 1. `gn/default_model.py` - Uses the above model to predict default decisions. Can be run from terminal or in IDE. See Appendix D.4 for details.
