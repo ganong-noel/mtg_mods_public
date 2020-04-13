@@ -8,14 +8,14 @@ if (environment == "Odyssey") {
   if (user == "Chanwool") {
     setwd("/n/home07/chanwoolkim/Desktop/hamp-emp/")
   } else if (user == "Pete") {
-    setwd("/n/home12/probertson/repo/hamp-emp/")
+    setwd("/n/home12/probertson/repo/mtg_mods_public/emprics/")
   } else if (user == "Guillermo") {
     setwd("/n/home01/gcarranzajordan2/Desktop/hamp-emp/")
   } else if (user == "Lei") {
     setwd("/n/home07/lma/repo/hamp-emp/")
   }
-  data_path <- "/n/boslfs/LABS/chodorow_reich_lab/hampra_v4/data/"
-  working_path <- "../../hamp_emp_working/"
+  data_path <- "../data/"
+  working_path <- "../../../hamp_emp_working/"
   data_path_local <- "data/"
 } else if (environment == "Local") {
   if (user == "Chanwool") {
@@ -34,7 +34,7 @@ if (environment == "Odyssey") {
 out_path <- "out/"
 out_path_diagnosis <- "out/diagnosis/"
 
-matched <- "Yes" # Options: 'Yes', 'No'
+matched <- "No" # Options: 'Yes', 'No'
 if (matched == "No") {
   suffix <- "_um"
 }
