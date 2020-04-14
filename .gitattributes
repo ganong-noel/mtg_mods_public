@@ -1,0 +1,2 @@
+data/HAMP_raw_files/HMP_Public_User_Mod_Data_All_20150317.csv filter=lfs diff=lfs merge=lfs -text
+data/HAMP_raw_files.zip filter=lfs diff=lfs merge=lfs -text
