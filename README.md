@@ -12,7 +12,7 @@ It will be archived as openicpsr 118401
 ---
 # Part 1: `empirics` directory
 
-This section of the analysis uses code (that is public and included in this repo) and proprietary Transunion credit bureau data (that is not public and therefore cannot be included in this repo). The Transunion file is stored on a Harvard server. To obtain permission from Transuion to access these data, email Erikka.Leighton@transunion.com. We grant any researchers with appropriate approval to conduct research using these files. We describe the code below.
+This section of the analysis uses code (that is public and included in this repo) and proprietary Transunion credit bureau data (that is not public and therefore cannot be included in this repo). The Transunion file is stored on a Harvard server. To obtain permission from Transuion to access these data, email Erikka.Leighton@transunion.com. We grant any researchers with appropriate approval to conduct research using these files. The public HAMP file used in the analysis can be found in the `data` subdirectory of the repository. It should be unzipped before attempting to run the code on the unmatched sample. We describe the code below.
 
 `master.R` is the master file for the code. The `environment` argument in the first line may be specified as:
 

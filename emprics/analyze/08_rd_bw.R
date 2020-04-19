@@ -64,8 +64,6 @@ for (max_width in c(1, 2, 4)) {
   i <- i + 1
 }
 
-write.csv(optimal_bw, file = paste0(out_path_diagnosis, "rd_", samp_file_name, "_optimal_bw.csv"))
-
 bw_preferred <-
   optimal_bw %>%
   filter(method == "IK" & max_width == 2) %>%
