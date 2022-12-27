@@ -98,7 +98,7 @@ pandas==0.22.0
 scipy==1.0.0
 seaborn==0.8.1
 # send2trash==1.4.2
-setuptools==38.4.0
+setuptools==65.5.1
 # simplegeneric==0.8.1
 # singledispatch==3.4.0.3
 six==1.11.0
